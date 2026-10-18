@@ -120,7 +120,7 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
               <application
-                  android:allowBackup="true"
+                  android:allowBackup="false"
                   android:icon="@android:drawable/sym_def_app_icon"
                   android:label="ED ALL"
                   android:roundIcon="@android:drawable/sym_def_app_icon"
@@ -162,7 +162,7 @@ jobs:
           </resources>
           EOF
 
-          # Create MainActivity.java with Fullscreen Video & Live Sync logic
+          # Create MainActivity.java with FLAG_SECURE, Fullscreen Video & Live Sync
           cat << 'EOF' > android/app/src/main/java/com/edall/app/MainActivity.java
           package com.edall.app;
 
@@ -200,6 +200,12 @@ jobs:
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+
+                  // 1. Prevent Screenshots & Screen Recording at OS level
+                  getWindow().setFlags(
+                      WindowManager.LayoutParams.FLAG_SECURE,
+                      WindowManager.LayoutParams.FLAG_SECURE
+                  );
 
                   FrameLayout rootLayout = new FrameLayout(this);
                   rootLayout.setLayoutParams(new ViewGroup.LayoutParams(
@@ -276,7 +282,7 @@ jobs:
 
                       @Override
                       public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                          // Offline fallback to bundled asset or cached local file
+                          // Offline fallback
                           File cachedFile = new File(getFilesDir(), "platform.html");
                           if (cachedFile.exists()) {
                               view.loadUrl("file://" + cachedFile.getAbsolutePath());
@@ -330,7 +336,6 @@ jobs:
               @Override
               public void onBackPressed() {
                   if (customView != null) {
-                      // If video is fullscreen, exit fullscreen first
                       if (webView.getWebChromeClient() != null) {
                           webView.getWebChromeClient().onHideCustomView();
                       }
