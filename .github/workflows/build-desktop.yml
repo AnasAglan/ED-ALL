@@ -1,0 +1,72 @@
+name: Build EdAll Desktop Installer
+
+on:
+  workflow_dispatch: # يتيح لك تشغيله يدوياً بضغطة زر
+  push:
+    paths:
+      - 'electron/**'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download Electron Runtime & Tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging/runtime
+          New-Item -ItemType Directory -Force -Path staging/runtime/resources/app/bin
+          New-Item -ItemType Directory -Force -Path staging/runtime/resources/app/platform
+
+          # تنزيل Electron الرسمي لويندوز 64-bit
+          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v33.2.1/electron-v33.2.1-win32-x64.zip" -OutFile electron.zip
+          Expand-Archive electron.zip -DestinationPath staging/runtime
+          Remove-Item electron.zip
+
+          # إعادة تسمية الملف التنفيذي إلى EdAll.exe
+          Rename-Item -Path "staging/runtime/electron.exe" -NewName "EdAll.exe"
+
+          # نسخ ملفات مشروع الديسكتوب
+          Copy-Item electron/main.cjs staging/runtime/resources/app/
+          Copy-Item electron/preload.cjs staging/runtime/resources/app/
+          Copy-Item electron/package.json staging/runtime/resources/app/
+          Copy-Item electron/offline.html staging/runtime/resources/app/
+          Copy-Item electron/icon.ico staging/runtime/resources/app/
+          Copy-Item electron/icon.ico staging/icon.ico
+          Copy-Item public/ed_master.html staging/runtime/resources/app/platform/
+
+          # تنزيل yt-dlp و deno المدمجين
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile staging/runtime/resources/app/bin/yt-dlp.exe
+          Invoke-WebRequest -Uri "https://github.com/denoland/deno/releases/download/v2.0.0/deno-x86_64-pc-windows-msvc.zip" -OutFile deno.zip
+          Expand-Archive deno.zip -DestinationPath staging/runtime/resources/app/bin/
+          Remove-Item deno.zip
+
+      - name: Compile NSIS Installer
+        shell: pwsh
+        run: |
+          # تثبيت NSIS عبر choco المدمج في خوادم ويندوز
+          choco install nsis -y --no-progress
+
+          # تعديل مسارات installer.nsi مؤقتاً لتطابق مجلد staging
+          (Get-Content electron/installer.nsi) `
+            -replace '/tmp/edall-v2/EdAll-Setup.exe', 'EdAll-Setup.exe' `
+            -replace '/tmp/edall-v2/icon.ico', 'staging/icon.ico' `
+            -replace '/tmp/edall-v2/runtime/\*', 'staging/runtime/*' | Set-Content staging_installer.nsi
+
+          & "C:\Program Files (x86)\NSIS\makensis.exe" staging_installer.nsi
+
+      - name: Upload Installer to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: Education
+          files: EdAll-Setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
