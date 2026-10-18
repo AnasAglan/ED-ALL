@@ -1,0 +1,368 @@
+name: Build EdAll Android App (APK)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Android APK & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Create Native Android Project Structure
+        run: |
+          mkdir -p android/app/src/main/java/com/edall/app
+          mkdir -p android/app/src/main/res/values
+          mkdir -p android/app/src/main/assets
+          mkdir -p android/gradle/wrapper
+
+          # Download latest platform code for offline fallback
+          curl -s -L -o android/app/src/main/assets/platform.html https://edall.lovable.app/ed_master.html
+
+          # Create root settings.gradle
+          cat << 'EOF' > android/settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "EdAll"
+          include ':app'
+          EOF
+
+          # Create root build.gradle
+          cat << 'EOF' > android/build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          tasks.register('clean', Delete) {
+              delete rootProject.buildDir
+          }
+          EOF
+
+          # Create gradle.properties
+          cat << 'EOF' > android/gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+
+          # Create app/build.gradle
+          cat << 'EOF' > android/app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.edall.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.edall.app"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName "2.0.0"
+
+                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                      signingConfig signingConfigs.debug
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.webkit:webkit:1.10.0'
+          }
+          EOF
+
+          # Create AndroidManifest.xml
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="ED ALL"
+                  android:roundIcon="@android:drawable/sym_def_app_icon"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.EdAll"
+                  android:usesCleartextTraffic="true"
+                  android:hardwareAccelerated="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+
+          </manifest>
+          EOF
+
+          # Create themes.xml
+          cat << 'EOF' > android/app/src/main/res/values/themes.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.EdAll" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+                  <item name="android:statusBarColor">#0b0f19</item>
+                  <item name="android:navigationBarColor">#0b0f19</item>
+                  <item name="android:windowBackground">#0b0f19</item>
+              </style>
+          </resources>
+          EOF
+
+          # Create strings.xml
+          cat << 'EOF' > android/app/src/main/res/values/strings.xml
+          <resources>
+              <string name="app_name">ED ALL</string>
+          </resources>
+          EOF
+
+          # Create MainActivity.java with Fullscreen Video & Live Sync logic
+          cat << 'EOF' > android/app/src/main/java/com/edall/app/MainActivity.java
+          package com.edall.app;
+
+          import android.annotation.SuppressLint;
+          import android.content.pm.ActivityInfo;
+          import android.graphics.Bitmap;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import androidx.appcompat.app.AppCompatActivity;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+
+          public class MainActivity extends AppCompatActivity {
+
+              private WebView webView;
+              private FrameLayout customViewContainer;
+              private WebChromeClient.CustomViewCallback customViewCallback;
+              private View customView;
+
+              private static final String ONLINE_URL = "https://edall.lovable.app/ed_master.html";
+
+              @SuppressLint("SetJavaScriptEnabled")
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  FrameLayout rootLayout = new FrameLayout(this);
+                  rootLayout.setLayoutParams(new ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  webView = new WebView(this);
+                  webView.setLayoutParams(new ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  customViewContainer = new FrameLayout(this);
+                  customViewContainer.setLayoutParams(new ViewGroup.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  customViewContainer.setVisibility(View.GONE);
+                  customViewContainer.setBackgroundColor(0xFF000000);
+
+                  rootLayout.addView(webView);
+                  rootLayout.addView(customViewContainer);
+                  setContentView(rootLayout);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setMediaPlaybackRequiresUserGesture(false);
+                  settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+                  settings.setUserAgentString(settings.getUserAgentString() + " EdAllAndroidApp/2.0");
+
+                  // Fullscreen video support via WebChromeClient
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onShowCustomView(View view, CustomViewCallback callback) {
+                          if (customView != null) {
+                              onHideCustomView();
+                              return;
+                          }
+                          customView = view;
+                          customViewCallback = callback;
+
+                          webView.setVisibility(View.GONE);
+                          customViewContainer.setVisibility(View.VISIBLE);
+                          customViewContainer.addView(view);
+
+                          // Rotate to landscape and hide system bars
+                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+                          hideSystemUI();
+                      }
+
+                      @Override
+                      public void onHideCustomView() {
+                          if (customView == null) return;
+
+                          customViewContainer.removeView(customView);
+                          customView = null;
+                          customViewContainer.setVisibility(View.GONE);
+                          webView.setVisibility(View.VISIBLE);
+
+                          if (customViewCallback != null) {
+                              customViewCallback.onCustomViewHidden();
+                              customViewCallback = null;
+                          }
+
+                          // Return to sensor/portrait and restore system bars
+                          setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                          showSystemUI();
+                      }
+                  });
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          return false; // keep navigation inside WebView
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                          // Offline fallback to bundled asset or cached local file
+                          File cachedFile = new File(getFilesDir(), "platform.html");
+                          if (cachedFile.exists()) {
+                              view.loadUrl("file://" + cachedFile.getAbsolutePath());
+                          } else {
+                              view.loadUrl("file:///android_asset/platform.html");
+                          }
+                      }
+                  });
+
+                  // Load online version directly
+                  webView.loadUrl(ONLINE_URL + "?app_sync=" + System.currentTimeMillis());
+
+                  // Background silent sync: save latest version for offline usage
+                  new Thread(() -> {
+                      try {
+                          URL url = new URL(ONLINE_URL);
+                          HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                          conn.setConnectTimeout(8000);
+                          conn.setReadTimeout(8000);
+                          if (conn.getResponseCode() == 200) {
+                              File localFile = new File(getFilesDir(), "platform.html");
+                              try (InputStream in = conn.getInputStream();
+                                   FileOutputStream out = new FileOutputStream(localFile)) {
+                                  byte[] buffer = new byte[8192];
+                                  int len;
+                                  while ((len = in.read(buffer)) != -1) {
+                                      out.write(buffer, 0, len);
+                                  }
+                              }
+                          }
+                      } catch (Exception ignored) {}
+                  }).start();
+              }
+
+              private void hideSystemUI() {
+                  View decorView = getWindow().getDecorView();
+                  decorView.setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                          | View.SYSTEM_UI_FLAG_FULLSCREEN);
+              }
+
+              private void showSystemUI() {
+                  View decorView = getWindow().getDecorView();
+                  decorView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (customView != null) {
+                      // If video is fullscreen, exit fullscreen first
+                      if (webView.getWebChromeClient() != null) {
+                          webView.getWebChromeClient().onHideCustomView();
+                      }
+                  } else if (webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build Android Release APK
+        run: |
+          cd android
+          gradle wrapper
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Prepare APK Deliverable
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk dist/EdAll.apk || cp android/app/build/outputs/apk/release/*.apk dist/EdAll.apk
+
+      - name: Upload APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: Education
+          name: "Education Release"
+          files: dist/EdAll.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
