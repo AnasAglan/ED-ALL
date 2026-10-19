@@ -1,3 +1,451 @@
+name: Build EdAll Android App (APK)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-android.yml'
+
+jobs:
+  build-apk:
+    name: Build Integrated Android App (Release APK)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+
+      - name: Scaffold Complete Android Project
+        run: |
+          mkdir -p android-project/app/src/main/java/com/edall/app
+          mkdir -p android-project/app/src/main/res/values
+          mkdir -p android-project/app/src/main/res/drawable
+          mkdir -p android-project/gradle/wrapper
+
+          # 1. Gradle Properties
+          cat << 'EOF' > android-project/gradle.properties
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          android.nonTransitiveRClass=true
+          EOF
+
+          # 2. Settings Gradle with verified repositories
+          cat << 'EOF' > android-project/settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url 'https://jitpack.io' }
+              }
+          }
+          rootProject.name = "EdAll"
+          include ':app'
+          EOF
+
+          # 3. Root build.gradle
+          cat << 'EOF' > android-project/build.gradle
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.2.2'
+              }
+          }
+          EOF
+
+          # 4. App build.gradle
+          cat << 'EOF' > android-project/app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.edall.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.edall.app"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 3
+                  versionName "3.0.0"
+
+                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      shrinkResources false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              packaging {
+                  resources {
+                      excludes += ['/META-INF/{AL2.0,LGPL2.1}', 'META-INF/DEPENDENCIES', 'META-INF/INDEX.LIST']
+                  }
+              }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core:1.12.0'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+              implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.5'
+          }
+          EOF
+
+          # 5. OkHttp Downloader for NewPipe
+          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
+          package com.edall.app;
+
+          import org.schabi.newpipe.extractor.downloader.Downloader;
+          import org.schabi.newpipe.extractor.downloader.Request;
+          import org.schabi.newpipe.extractor.downloader.Response;
+          import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
+
+          import java.io.IOException;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.concurrent.TimeUnit;
+
+          import okhttp3.Headers;
+          import okhttp3.OkHttpClient;
+          import okhttp3.RequestBody;
+          import okhttp3.ResponseBody;
+
+          public class OkHttpDownloader extends Downloader {
+              private final OkHttpClient client;
+
+              public OkHttpDownloader(OkHttpClient client) {
+                  this.client = client.newBuilder()
+                          .connectTimeout(20, TimeUnit.SECONDS)
+                          .readTimeout(25, TimeUnit.SECONDS)
+                          .build();
+              }
+
+              @Override
+              public Response execute(Request request) throws IOException, ReCaptchaException {
+                  String method = request.httpMethod();
+                  String url = request.url();
+                  byte[] dataToSend = request.dataToSend();
+
+                  RequestBody requestBody = null;
+                  if (dataToSend != null) {
+                      requestBody = RequestBody.create(dataToSend, null);
+                  }
+
+                  okhttp3.Request.Builder builder = new okhttp3.Request.Builder()
+                          .method(method, requestBody)
+                          .url(url)
+                          .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+
+                  for (Map.Entry<String, List<String>> pair : request.headers().entrySet()) {
+                      builder.removeHeader(pair.getKey());
+                      for (String val : pair.getValue()) {
+                          builder.addHeader(pair.getKey(), val);
+                      }
+                  }
+
+                  okhttp3.Response response = client.newCall(builder.build()).execute();
+                  if (response.code() == 429) {
+                      response.close();
+                      throw new ReCaptchaException("reCaptcha required", url);
+                  }
+
+                  ResponseBody body = response.body();
+                  String responseBodyText = body != null ? body.string() : "";
+                  Headers headers = response.headers();
+                  Map<String, List<String>> responseHeaders = new HashMap<>(headers.toMultimap());
+
+                  return new Response(
+                          response.code(),
+                          response.message(),
+                          responseHeaders,
+                          responseBodyText,
+                          response.request().url().toString()
+                  );
+              }
+          }
+          EOF
+
+          # 6. WebAppInterface & Bridge
+          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/WebAppInterface.java
+          package com.edall.app;
+
+          import android.webkit.JavascriptInterface;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import org.schabi.newpipe.extractor.NewPipe;
+          import org.schabi.newpipe.extractor.ServiceList;
+          import org.schabi.newpipe.extractor.stream.AudioStream;
+          import org.schabi.newpipe.extractor.stream.StreamInfo;
+          import org.schabi.newpipe.extractor.stream.VideoStream;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Map;
+
+          public class WebAppInterface {
+              private final MainActivity activity;
+
+              public WebAppInterface(MainActivity activity) {
+                  this.activity = activity;
+              }
+
+              @JavascriptInterface
+              public boolean isApp() { return true; }
+
+              @JavascriptInterface
+              public boolean isAndroid() { return true; }
+
+              @JavascriptInterface
+              public void setFullscreen(boolean enabled) {
+                  activity.runOnUiThread(() -> activity.setDesktopFullscreen(enabled));
+              }
+
+              @JavascriptInterface
+              public String extractFormats(String videoId) {
+                  try {
+                      String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
+                      StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
+
+                      Map<Integer, VideoStream> bestByHeight = new HashMap<>();
+                      for (VideoStream vs : info.getVideoStreams()) {
+                          int h = vs.getHeight();
+                          if (h <= 0) continue;
+                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                              bestByHeight.put(h, vs);
+                          }
+                      }
+                      for (VideoStream vs : info.getVideoOnlyStreams()) {
+                          int h = vs.getHeight();
+                          if (h <= 0) continue;
+                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                              bestByHeight.put(h, vs);
+                          }
+                      }
+
+                      List<VideoStream> sortedVideos = new ArrayList<>(bestByHeight.values());
+                      Collections.sort(sortedVideos, (a, b) -> Integer.compare(b.getHeight(), a.getHeight()));
+
+                      AudioStream bestAudio = null;
+                      for (AudioStream as : info.getAudioStreams()) {
+                          if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
+                              bestAudio = as;
+                          }
+                      }
+
+                      JSONObject root = new JSONObject();
+                      root.put("title", info.getName() != null ? info.getName() : "Video");
+                      root.put("expiresAt", System.currentTimeMillis() + 6 * 3600 * 1000);
+
+                      JSONArray videosArr = new JSONArray();
+                      for (VideoStream vs : sortedVideos) {
+                          JSONObject vObj = new JSONObject();
+                          vObj.put("h", vs.getHeight());
+                          vObj.put("url", vs.getContent());
+                          vObj.put("hasAudio", !vs.isVideoOnly());
+                          videosArr.put(vObj);
+                      }
+                      root.put("videos", videosArr);
+
+                      if (bestAudio != null) {
+                          JSONObject aObj = new JSONObject();
+                          aObj.put("url", bestAudio.getContent());
+                          root.put("audio", aObj);
+                      }
+
+                      return root.toString();
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                      try {
+                          JSONObject err = new JSONObject();
+                          err.put("error", e.getMessage() != null ? e.getMessage() : "Extraction failed");
+                          return err.toString();
+                      } catch (Exception ignored) {
+                          return "{\"error\":\"Extraction failed\"}";
+                      }
+                  }
+              }
+          }
+          EOF
+
+          # 7. MainActivity
+          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
+          package com.edall.app;
+
+          import android.annotation.SuppressLint;
+          import android.content.pm.ActivityInfo;
+          import android.graphics.Bitmap;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.WindowInsets;
+          import android.view.WindowInsetsController;
+          import android.view.WindowManager;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.activity.OnBackPressedCallback;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          import org.schabi.newpipe.extractor.NewPipe;
+          import okhttp3.OkHttpClient;
+
+          public class MainActivity extends AppCompatActivity {
+              private WebView webView;
+              private static final String PLATFORM_URL = "https://edall.lovable.app/ed_master.html";
+
+              private static final String JS_BRIDGE_SHIM =
+                  "(function() {" +
+                  "  if (window._edallDesktopInjected) return;" +
+                  "  window._edallDesktopInjected = true;" +
+                  "  window.edallAndroid = {" +
+                  "    isApp: function() { return true; }," +
+                  "    isAndroid: function() { return true; }" +
+                  "  };" +
+                  "  window.edallDesktop = {" +
+                  "    isDesktop: true," +
+                  "    isAndroid: true," +
+                  "    version: '3.0.0'," +
+                  "    getYoutubeFormats: function(vid, force) {" +
+                  "      return new Promise(function(resolve, reject) {" +
+                  "        setTimeout(function() {" +
+                  "          try {" +
+                  "            var res = window.edallNative.extractFormats(vid);" +
+                  "            if (!res) { reject(new Error('No response from native extractor')); return; }" +
+                  "            var data = JSON.parse(res);" +
+                  "            if (data.error) { reject(new Error(data.error)); return; }" +
+                  "            if (data.videos && data.videos.length > 0) { resolve(data); }" +
+                  "            else { reject(new Error('No playable video streams')); }" +
+                  "          } catch(err) { reject(err); }" +
+                  "        }, 10);" +
+                  "      });" +
+                  "    }," +
+                  "    setVideoFullscreen: function(enabled) {" +
+                  "      try { window.edallNative.setFullscreen(enabled === true); return Promise.resolve(true); }" +
+                  "      catch(e) { return Promise.resolve(false); }" +
+                  "    }" +
+                  "  };" +
+                  "  var hero = document.getElementById('desktopDownloadHero');" +
+                  "  if (hero) hero.style.display = 'none';" +
+                  "})();";
+
+              @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  // 1. Full anti-recording & anti-screenshot security
+                  getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+
+                  // 2. Initialize NewPipe Extractor
+                  try {
+                      NewPipe.init(new OkHttpDownloader(new OkHttpClient()));
+                  } catch (Exception ignored) {}
+
+                  // 3. Create & Configure WebView
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings ws = webView.getSettings();
+                  ws.setJavaScriptEnabled(true);
+                  ws.setDomStorageEnabled(true);
+                  ws.setDatabaseEnabled(true);
+                  ws.setMediaPlaybackRequiresUserGesture(false);
+                  ws.setAllowFileAccess(true);
+                  ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/3.0 EdAllDesktop/2.0");
+
+                  webView.addJavascriptInterface(new WebAppInterface(this), "edallNative");
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                          super.onPageStarted(view, url, favicon);
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      }
+
+                      @Override
+                      public void onPageCommitVisible(WebView view, String url) {
+                          super.onPageCommitVisible(view, url);
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          super.onPageFinished(view, url);
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                          super.onReceivedError(view, request, error);
+                      }
+                  });
+
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(PermissionRequest request) {
+                          request.grant(request.getResources());
+                      }
+                  });
+
+                  // 4. Handle Back button properly
+                  getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+                      @Override
+                      public void handleOnBackPressed() {
+                          if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
+                              setDesktopFullscreen(false);
+                          } else if (webView.canGoBack()) {
+                              webView.goBack();
+                          } else {
+                              finish();
+                          }
+                      }
+                  });
 
                   webView.loadUrl(PLATFORM_URL);
               }
