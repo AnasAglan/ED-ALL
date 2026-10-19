@@ -129,7 +129,9 @@ jobs:
           import android.view.View;
           import android.view.ViewGroup;
           import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
           import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
           import android.webkit.WebResourceRequest;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
@@ -142,6 +144,18 @@ jobs:
               private FrameLayout fullscreenContainer;
               private View customView;
               private WebChromeClient.CustomViewCallback customViewCallback;
+
+              public static class WebAppInterface {
+                  @JavascriptInterface
+                  public boolean isApp() {
+                      return true;
+                  }
+
+                  @JavascriptInterface
+                  public boolean isAndroid() {
+                      return true;
+                  }
+              }
 
               @SuppressLint("SetJavaScriptEnabled")
               @Override
@@ -167,7 +181,10 @@ jobs:
                   settings.setMediaPlaybackRequiresUserGesture(false);
                   settings.setUseWideViewPort(true);
                   settings.setLoadWithOverviewMode(true);
-                  settings.setUserAgentString(settings.getUserAgentString() + " EdAllAndroidApp/2.0");
+                  settings.setUserAgentString(settings.getUserAgentString() + " EdAllAndroid/1.0 EdAllAndroidApp/2.0");
+
+                  // تمكين واجهة الجافاسكريبت للتعرف على التطبيق وإخفاء أزرار التحميل
+                  webView.addJavascriptInterface(new WebAppInterface(), "edallAndroid");
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
@@ -176,8 +193,10 @@ jobs:
                       }
 
                       @Override
-                      public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                          view.loadUrl("file:///android_asset/platform.html");
+                      public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                          if (request.isForMainFrame()) {
+                              view.loadUrl("file:///android_asset/platform.html");
+                          }
                       }
                   });
 
