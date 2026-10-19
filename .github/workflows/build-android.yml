@@ -576,9 +576,10 @@ jobs:
           cp "$UNSIGNED_APK" "$RUNNER_TEMP/EdAll-unsigned.apk"
           echo "UNSIGNED_APK=$RUNNER_TEMP/EdAll-unsigned.apk" >> "$GITHUB_ENV"
 
-      # All four EDALL_* secrets are required. A release key must remain the
-      # same for every build, otherwise Android rejects app updates.
-      - name: Load persistent signing key
+      # When EDALL_* secrets are present, the same release key is used for every
+      # build. Otherwise a temporary key is made so that a first-install APK can
+      # still be produced.
+      - name: Load or create signing key
         shell: bash
         env:
           EDALL_KEYSTORE_BASE64: ${{ secrets.EDALL_KEYSTORE_BASE64 }}
@@ -589,14 +590,29 @@ jobs:
           set -euo pipefail
           KEYSTORE_PATH="$RUNNER_TEMP/edall-release.keystore"
 
-          : "${EDALL_KEYSTORE_BASE64:?Set EDALL_KEYSTORE_BASE64}"
-          : "${EDALL_KEYSTORE_PASSWORD:?Set EDALL_KEYSTORE_PASSWORD}"
-          : "${EDALL_KEY_ALIAS:?Set EDALL_KEY_ALIAS}"
-          : "${EDALL_KEY_PASSWORD:?Set EDALL_KEY_PASSWORD}"
-          printf '%s' "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
-          KEYSTORE_PASSWORD="$EDALL_KEYSTORE_PASSWORD"
-          KEY_ALIAS="$EDALL_KEY_ALIAS"
-          KEY_PASSWORD="$EDALL_KEY_PASSWORD"
+          if [ -n "${EDALL_KEYSTORE_BASE64:-}" ]; then
+            : "${EDALL_KEYSTORE_PASSWORD:?Set EDALL_KEYSTORE_PASSWORD}"
+            : "${EDALL_KEY_ALIAS:?Set EDALL_KEY_ALIAS}"
+            : "${EDALL_KEY_PASSWORD:?Set EDALL_KEY_PASSWORD}"
+            printf '%s' "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            KEYSTORE_PASSWORD="$EDALL_KEYSTORE_PASSWORD"
+            KEY_ALIAS="$EDALL_KEY_ALIAS"
+            KEY_PASSWORD="$EDALL_KEY_PASSWORD"
+          else
+            echo '::warning::No EDALL signing secrets were found. A temporary key will be used. Uninstall any older EdAll APK before installing this build; configure the secrets for future app updates.'
+            KEYSTORE_PASSWORD="$(openssl rand -hex 24)"
+            KEY_ALIAS='edall'
+            KEY_PASSWORD="$KEYSTORE_PASSWORD"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname 'CN=EdAll, OU=App, O=EdAll, L=Cairo, ST=Cairo, C=EG'
+          fi
 
           keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null
           echo "::add-mask::$KEYSTORE_PASSWORD"
