@@ -17,8 +17,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
+      # تثبيت إصدار Gradle 8.6 المتوافق تماماً مع أندرويد
+      - name: Setup Gradle 8.6
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
 
       - name: Create Native Android Project Structure
         run: |
@@ -26,16 +29,22 @@ jobs:
           mkdir -p android-app/app/src/main/res/values
           mkdir -p android-app/app/src/main/res/drawable
           mkdir -p android-app/app/src/main/res/layout
-          mkdir -p android-app/app/src/main/res/mipmap-hdpi
+          mkdir -p android-app/app/src/main/res/mipmap-xxhdpi
           mkdir -p android-app/app/src/main/assets
+
+      - name: Accept Android SDK Licenses & Setup Path
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android-app/local.properties
+          mkdir -p "$ANDROID_HOME/licenses" || true
+          printf "24333f8a63b682449e00fe1e4d7521a6e0f70794\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_HOME/licenses/android-sdk-license"
 
       - name: Download App Assets & Web Snapshot
         run: |
           # تنزيل أحدث نسخة من كود المنصة للعمل أوفلاين
           curl -sSL "https://edall.lovable.app/ed_master.html" -o android-app/app/src/main/assets/platform.html
           
-          # إنشاء أيقونة افتراضية عالية الدقة للتطبيق
-          curl -sSL "https://edall.lovable.app/favicon.ico" -o android-app/app/src/main/res/mipmap-hdpi/ic_launcher.png || true
+          # تنزيل أيقونة PNG أصلية وعالية الدقة للمنصة
+          curl -sSL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o android-app/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
 
       - name: Write Android Manifest
         run: |
@@ -134,7 +143,7 @@ jobs:
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  // 1. حظر تصوير وتسجيل الشاشة بشكل قاطع
+                  // حظر تصوير الشاشة وتسجيل الفيديو
                   getWindow().setFlags(
                       WindowManager.LayoutParams.FLAG_SECURE,
                       WindowManager.LayoutParams.FLAG_SECURE
@@ -158,18 +167,16 @@ jobs:
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
                       public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                          return false; // تصفح داخل التطبيق دون فتح متصفح خارجي
+                          return false;
                       }
 
                       @Override
                       public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                          // عند انقطاع الإنترنت يتم استخدام النسخة المدمجة تلقائياً
                           view.loadUrl("file:///android_asset/platform.html");
                       }
                   });
 
                   webView.setWebChromeClient(new WebChromeClient() {
-                      // دعم تكبير الفيديو بملء الشاشة مع تدوير تلقائي
                       @Override
                       public void onShowCustomView(View view, CustomViewCallback callback) {
                           if (customView != null) {
@@ -183,7 +190,6 @@ jobs:
                           fullscreenContainer.setVisibility(View.VISIBLE);
                           webView.setVisibility(View.GONE);
 
-                          // تحويل الشاشة لوضع ملء الشاشة الأفقي
                           setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
                           getWindow().getDecorView().setSystemUiVisibility(
                               View.SYSTEM_UI_FLAG_FULLSCREEN |
@@ -206,14 +212,12 @@ jobs:
                       }
                   });
 
-                  // محاولة فتح المنصة الحية مباشرة
                   webView.loadUrl("https://edall.lovable.app/ed_master.html");
               }
 
               @Override
               public void onBackPressed() {
                   if (customView != null) {
-                      // إذا كان الفيديو مكبراً، زر الرجوع يغلق التكبير أولاً
                       if (webView.getWebChromeClient() != null) {
                           ((WebChromeClient) webView.getWebChromeClient()).onHideCustomView();
                       }
@@ -226,7 +230,7 @@ jobs:
           }
           EOF
 
-      - name: Write Gradle Build Files
+      - name: Write Gradle Settings & Build Files
         run: |
           cat << 'EOF' > android-app/settings.gradle
           pluginManagement {
@@ -312,7 +316,7 @@ jobs:
       - name: Build Signed Release APK
         run: |
           cd android-app
-          gradle assembleRelease --stacktrace
+          gradle assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release.apk ../EdAll.apk
 
       - name: Publish APK to GitHub Releases
