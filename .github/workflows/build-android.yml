@@ -6,6 +6,10 @@ on:
     paths:
       - '.github/workflows/build-android.yml'
 
+# Allow GitHub Actions to create or update the GitHub Release.
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     name: Build Integrated Android App (Release APK)
@@ -564,5 +568,4 @@ jobs:
           tag_name: Education
           name: "EdAll Education Release"
           files: dist/EdAll.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
