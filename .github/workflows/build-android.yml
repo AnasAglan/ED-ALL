@@ -6,9 +6,17 @@ on:
     paths:
       - '.github/workflows/build-android.yml'
 
-# Allow GitHub Actions to create or update the GitHub Release.
+# Required by softprops/action-gh-release to create or update the release.
 permissions:
   contents: write
+
+concurrency:
+  group: edall-android-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ANDROID_API_LEVEL: '34'
+  ANDROID_BUILD_TOOLS: '34.0.0'
 
 jobs:
   build-apk:
@@ -16,28 +24,42 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
+      # `tools` is obsolete and must not be installed. setup-android v4 also
+      # installs the command-line tools required by sdkmanager and apksigner.
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: 'platform-tools'
+          packages: platform-tools
 
-      - name: Scaffold Complete Android Project
+      - name: Install required Android SDK packages
+        shell: bash
         run: |
+          set -euo pipefail
+          sdkmanager --install \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+      - name: Scaffold complete Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
           mkdir -p android-project/app/src/main/java/com/edall/app
           mkdir -p android-project/app/src/main/res/values
           mkdir -p android-project/app/src/main/res/drawable
+          mkdir -p android-project/app/src/main/res/mipmap-hdpi
           mkdir -p android-project/gradle/wrapper
 
-          # 1. Gradle Properties
+          # 1. Gradle properties
           cat << 'EOF' > android-project/gradle.properties
           org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
           android.useAndroidX=true
@@ -45,7 +67,7 @@ jobs:
           android.nonTransitiveRClass=true
           EOF
 
-          # 2. Settings Gradle with verified repositories
+          # 2. Gradle settings
           cat << 'EOF' > android-project/settings.gradle
           pluginManagement {
               repositories {
@@ -66,24 +88,21 @@ jobs:
           include ':app'
           EOF
 
-          # 3. Root build.gradle
+          # 3. Root Gradle build file. Giving the plugin an explicit version
+          # avoids relying on a deprecated buildscript classpath lookup.
           cat << 'EOF' > android-project/build.gradle
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.2.2'
-              }
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
           }
           EOF
 
-          # 4. App build.gradle
+          # 4. App Gradle build file
           cat << 'EOF' > android-project/app/build.gradle
           plugins {
               id 'com.android.application'
           }
+
+          def ciBuildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
 
           android {
               namespace 'com.edall.app'
@@ -93,8 +112,10 @@ jobs:
                   applicationId "com.edall.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 3
-                  versionName "3.0.0"
+                  // A monotonically increasing code prevents a valid update
+                  // from being rejected as a version downgrade.
+                  versionCode 100000 + ciBuildNumber
+                  versionName "3.0.${ciBuildNumber}"
 
                   testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
               }
@@ -132,7 +153,7 @@ jobs:
           }
           EOF
 
-          # 5. OkHttp Downloader for NewPipe
+          # 5. OkHttp downloader for NewPipe
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
           package com.edall.app;
 
@@ -207,14 +228,13 @@ jobs:
           }
           EOF
 
-          # 6. WebAppInterface & Bridge
+          # 6. Web app interface and JavaScript bridge
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/WebAppInterface.java
           package com.edall.app;
 
           import android.webkit.JavascriptInterface;
           import org.json.JSONArray;
           import org.json.JSONObject;
-          import org.schabi.newpipe.extractor.NewPipe;
           import org.schabi.newpipe.extractor.ServiceList;
           import org.schabi.newpipe.extractor.stream.AudioStream;
           import org.schabi.newpipe.extractor.stream.StreamInfo;
@@ -222,7 +242,6 @@ jobs:
 
           import java.util.ArrayList;
           import java.util.Collections;
-          import java.util.Comparator;
           import java.util.HashMap;
           import java.util.List;
           import java.util.Map;
@@ -312,7 +331,7 @@ jobs:
           }
           EOF
 
-          # 7. MainActivity
+          # 7. Main activity
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
           package com.edall.app;
 
@@ -382,15 +401,13 @@ jobs:
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  // 1. Full anti-recording & anti-screenshot security
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
-                  // 2. Initialize NewPipe Extractor
                   try {
                       NewPipe.init(new OkHttpDownloader(new OkHttpClient()));
-                  } catch (Exception ignored) {}
+                  } catch (Exception ignored) {
+                  }
 
-                  // 3. Create & Configure WebView
                   webView = new WebView(this);
                   setContentView(webView);
 
@@ -437,7 +454,6 @@ jobs:
                       }
                   });
 
-                  // 4. Handle Back button properly
                   getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
                       @Override
                       public void handleOnBackPressed() {
@@ -488,7 +504,8 @@ jobs:
           }
           EOF
 
-          # 8. AndroidManifest.xml
+          # 8. Android manifest. `exported=true` is required for Android 12+
+          # when an activity has an intent filter.
           cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -518,11 +535,16 @@ jobs:
           </manifest>
           EOF
 
-          # 9. Default app icon
-          mkdir -p android-project/app/src/main/res/mipmap-hdpi
-          curl -sL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          # 9. App icon. A tiny valid fallback keeps the build deterministic if
+          # the remote icon host is temporarily unavailable.
+          if ! curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+            "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" \
+            --output android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png; then
+            echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlShc0AAAAASUVORK5CYII=' \
+              | base64 --decode > android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          fi
 
-          # 10. Generate Gradle Wrapper 8.6
+          # 10. Gradle 8.6 wrapper metadata
           cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
@@ -531,41 +553,111 @@ jobs:
           zipStorePath=wrapper/dists
           EOF
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.6'
+          cache-provider: basic
 
-      - name: Build Signed Release APK
+      - name: Build unsigned release APK
         working-directory: android-project
+        shell: bash
         run: |
-          gradle assembleRelease --stacktrace
+          set -euo pipefail
+          gradle --no-daemon clean :app:assembleRelease --stacktrace
 
-          # Find unsigned APK
-          APK_PATH=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
-          echo "Found APK at: $APK_PATH"
+          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ ! -f "$UNSIGNED_APK" ]; then
+            UNSIGNED_APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+          fi
 
-          # Generate Release Keystore and Sign APK
-          keytool -genkey -v -keystore release.keystore -alias edall -keyalg RSA -keysize 2048 -validity 10000 -storepass edallpass -keypass edallpass -dname "CN=EdAll, OU=App, O=EdAll, L=Cairo, S=Cairo, C=EG"
-          
-          # Sign with jarsigner
-          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 -keystore release.keystore -storepass edallpass -keypass edallpass "$APK_PATH" edall
+          test -n "${UNSIGNED_APK:-}"
+          test -s "$UNSIGNED_APK"
+          cp "$UNSIGNED_APK" "$RUNNER_TEMP/EdAll-unsigned.apk"
+          echo "UNSIGNED_APK=$RUNNER_TEMP/EdAll-unsigned.apk" >> "$GITHUB_ENV"
 
-          mkdir -p ../dist
-          cp "$APK_PATH" ../dist/EdAll.apk
+      # All four EDALL_* secrets are required. A release key must remain the
+      # same for every build, otherwise Android rejects app updates.
+      - name: Load persistent signing key
+        shell: bash
+        env:
+          EDALL_KEYSTORE_BASE64: ${{ secrets.EDALL_KEYSTORE_BASE64 }}
+          EDALL_KEYSTORE_PASSWORD: ${{ secrets.EDALL_KEYSTORE_PASSWORD }}
+          EDALL_KEY_ALIAS: ${{ secrets.EDALL_KEY_ALIAS }}
+          EDALL_KEY_PASSWORD: ${{ secrets.EDALL_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/edall-release.keystore"
 
-      - name: Upload APK Artifact
+          : "${EDALL_KEYSTORE_BASE64:?Set EDALL_KEYSTORE_BASE64}"
+          : "${EDALL_KEYSTORE_PASSWORD:?Set EDALL_KEYSTORE_PASSWORD}"
+          : "${EDALL_KEY_ALIAS:?Set EDALL_KEY_ALIAS}"
+          : "${EDALL_KEY_PASSWORD:?Set EDALL_KEY_PASSWORD}"
+          printf '%s' "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          KEYSTORE_PASSWORD="$EDALL_KEYSTORE_PASSWORD"
+          KEY_ALIAS="$EDALL_KEY_ALIAS"
+          KEY_PASSWORD="$EDALL_KEY_PASSWORD"
+
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null
+          echo "::add-mask::$KEYSTORE_PASSWORD"
+          echo "::add-mask::$KEY_PASSWORD"
+          {
+            echo "EDALL_KEYSTORE_PATH=$KEYSTORE_PATH"
+            echo "EDALL_SIGNING_STORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "EDALL_SIGNING_KEY_ALIAS=$KEY_ALIAS"
+            echo "EDALL_SIGNING_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Align, sign, and verify release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS_DIR="$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
+          ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
+          APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+          ALIGNED_APK="$RUNNER_TEMP/EdAll-aligned.apk"
+          SIGNED_APK="$RUNNER_TEMP/EdAll.apk"
+
+          test -x "$ZIPALIGN"
+          test -x "$APKSIGNER"
+          test -s "$UNSIGNED_APK"
+
+          # Alignment must happen before apksigner, or it invalidates the APK
+          # signing block. apksigner creates the V1, V2, and V3 signatures.
+          "$ZIPALIGN" -f -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+          "$APKSIGNER" sign \
+            --ks "$EDALL_KEYSTORE_PATH" \
+            --ks-key-alias "$EDALL_SIGNING_KEY_ALIAS" \
+            --ks-pass env:EDALL_SIGNING_STORE_PASSWORD \
+            --key-pass env:EDALL_SIGNING_KEY_PASSWORD \
+            --min-sdk-version 24 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --v4-signing-enabled false \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
+
+          "$APKSIGNER" verify --verbose --print-certs --min-sdk-version 24 "$SIGNED_APK"
+          test -s "$SIGNED_APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$SIGNED_APK" "$GITHUB_WORKSPACE/dist/EdAll.apk"
+
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: EdAll-Android-APK
           path: dist/EdAll.apk
           if-no-files-found: error
 
-      - name: Release APK to GitHub Releases
-        uses: softprops/action-gh-release@v2
+      - name: Publish APK to GitHub Releases
         if: success()
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: Education
-          name: "EdAll Education Release"
+          name: EdAll Education Release
+          target_commitish: ${{ github.sha }}
           files: dist/EdAll.apk
+          fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}
