@@ -2,16 +2,17 @@ name: Build EdAll Android App (APK)
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    paths:
+      - '.github/workflows/build-android.yml'
 
 jobs:
-  build:
+  build-apk:
+    name: Build Integrated Android App (Release APK)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -20,34 +21,26 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.6'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK Licenses
+      - name: Scaffold Complete Android Project
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          mkdir -p android-project/app/src/main/java/com/edall/app
+          mkdir -p android-project/app/src/main/res/values
+          mkdir -p android-project/app/src/main/res/drawable
+          mkdir -p android-project/gradle/wrapper
 
-      - name: Scaffold Android Native Project
-        run: |
-          mkdir -p app/src/main/java/com/edall/app
-          mkdir -p app/src/main/res/values
-          mkdir -p app/src/main/res/mipmap-xxhdpi
-          mkdir -p app/src/main/res/drawable
-
-          # 1. تحميل أيقونة المنصة الرسمية
-          curl -sL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-
-          # 2. إعدادات Gradle العامة (gradle.properties)
-          cat << 'EOF' > gradle.properties
+          # 1. Gradle Properties
+          cat << 'EOF' > android-project/gradle.properties
           org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
           android.useAndroidX=true
+          android.enableJetifier=true
           android.nonTransitiveRClass=true
           EOF
 
-          # 3. إعدادات المشروع والمستودعات (settings.gradle)
-          cat << 'EOF' > settings.gradle
+          # 2. Settings Gradle with verified repositories
+          cat << 'EOF' > android-project/settings.gradle
           pluginManagement {
               repositories {
                   google()
@@ -67,8 +60,8 @@ jobs:
           include ':app'
           EOF
 
-          # 4. ملف البناء الرئيسي (build.gradle) - تم إصلاح المستودعات هنا
-          cat << 'EOF' > build.gradle
+          # 3. Root build.gradle
+          cat << 'EOF' > android-project/build.gradle
           buildscript {
               repositories {
                   google()
@@ -78,22 +71,10 @@ jobs:
                   classpath 'com.android.tools.build:gradle:8.2.2'
               }
           }
-
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-                  maven { url 'https://jitpack.io' }
-              }
-          }
-
-          task clean(type: Delete) {
-              delete rootProject.buildDir
-          }
           EOF
 
-          # 5. ملف بناء التطبيق (app/build.gradle)
-          cat << 'EOF' > app/build.gradle
+          # 4. App build.gradle
+          cat << 'EOF' > android-project/app/build.gradle
           plugins {
               id 'com.android.application'
           }
@@ -106,15 +87,17 @@ jobs:
                   applicationId "com.edall.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 2
-                  versionName "2.0.0"
+                  versionCode 3
+                  versionName "3.0.0"
+
+                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
               }
 
               buildTypes {
                   release {
                       minifyEnabled false
                       shrinkResources false
-                      signingConfig signingConfigs.debug
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
                   }
               }
 
@@ -125,17 +108,7 @@ jobs:
 
               packaging {
                   resources {
-                      excludes += [
-                          'META-INF/DEPENDENCIES',
-                          'META-INF/LICENSE',
-                          'META-INF/LICENSE.txt',
-                          'META-INF/license.txt',
-                          'META-INF/NOTICE',
-                          'META-INF/NOTICE.txt',
-                          'META-INF/notice.txt',
-                          'META-INF/INDEX.LIST',
-                          'META-INF/INDEX.list'
-                      ]
+                      excludes += ['/META-INF/{AL2.0,LGPL2.1}', 'META-INF/DEPENDENCIES', 'META-INF/INDEX.LIST']
                   }
               }
 
@@ -147,62 +120,14 @@ jobs:
 
           dependencies {
               implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.core:core:1.12.0'
               implementation 'com.squareup.okhttp3:okhttp:4.12.0'
               implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.5'
           }
           EOF
 
-          # 6. ملف البيان والأذونات (AndroidManifest.xml)
-          cat << 'EOF' > app/src/main/AndroidManifest.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-              <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-              <application
-                  android:allowBackup="false"
-                  android:icon="@mipmap/ic_launcher"
-                  android:label="EdAll"
-                  android:roundIcon="@mipmap/ic_launcher"
-                  android:supportsRtl="true"
-                  android:theme="@style/AppTheme"
-                  android:hardwareAccelerated="true"
-                  android:usesCleartextTraffic="true">
-
-                  <activity
-                      android:name=".MainActivity"
-                      android:exported="true"
-                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-                      android:windowSoftInputMode="adjustResize">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          # 7. الثيم والألوان (res/values/styles.xml & strings.xml)
-          cat << 'EOF' > app/src/main/res/values/styles.xml
-          <resources>
-              <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
-                  <item name="android:windowBackground">#0F172A</item>
-                  <item name="android:statusBarColor">#0F172A</item>
-                  <item name="android:navigationBarColor">#0F172A</item>
-              </style>
-          </resources>
-          EOF
-
-          cat << 'EOF' > app/src/main/res/values/strings.xml
-          <resources>
-              <string name="app_name">EdAll</string>
-          </resources>
-          EOF
-
-          # 8. محرك تحميل NewPipe (OkHttpDownloader.java)
-          cat << 'EOF' > app/src/main/java/com/edall/app/OkHttpDownloader.java
+          # 5. OkHttp Downloader for NewPipe
+          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
           package com.edall.app;
 
           import org.schabi.newpipe.extractor.downloader.Downloader;
@@ -224,66 +149,63 @@ jobs:
           public class OkHttpDownloader extends Downloader {
               private final OkHttpClient client;
 
-              public OkHttpDownloader() {
-                  this.client = new OkHttpClient.Builder()
-                          .connectTimeout(30, TimeUnit.SECONDS)
-                          .readTimeout(30, TimeUnit.SECONDS)
+              public OkHttpDownloader(OkHttpClient client) {
+                  this.client = client.newBuilder()
+                          .connectTimeout(20, TimeUnit.SECONDS)
+                          .readTimeout(25, TimeUnit.SECONDS)
                           .build();
               }
 
               @Override
               public Response execute(Request request) throws IOException, ReCaptchaException {
-                  String httpMethod = request.httpMethod();
+                  String method = request.httpMethod();
                   String url = request.url();
-                  Headers.Builder headersBuilder = new Headers.Builder();
-                  if (request.headers() != null) {
-                      for (Map.Entry<String, List<String>> entry : request.headers().entrySet()) {
-                          for (String val : entry.getValue()) {
-                              headersBuilder.add(entry.getKey(), val);
-                          }
-                      }
+                  byte[] dataToSend = request.dataToSend();
+
+                  RequestBody requestBody = null;
+                  if (dataToSend != null) {
+                      requestBody = RequestBody.create(dataToSend, null);
                   }
 
-                  RequestBody body = null;
-                  if (request.dataToSend() != null) {
-                      body = RequestBody.create(request.dataToSend(), null);
-                  }
-
-                  okhttp3.Request.Builder okReq = new okhttp3.Request.Builder()
+                  okhttp3.Request.Builder builder = new okhttp3.Request.Builder()
+                          .method(method, requestBody)
                           .url(url)
-                          .headers(headersBuilder.build())
-                          .method(httpMethod, body);
+                          .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
-                  try (okhttp3.Response response = client.newCall(okReq.build()).execute()) {
-                      if (response.code() == 429) {
-                          throw new ReCaptchaException("reCAPTCHA requested", url);
+                  for (Map.Entry<String, List<String>> pair : request.headers().entrySet()) {
+                      builder.removeHeader(pair.getKey());
+                      for (String val : pair.getValue()) {
+                          builder.addHeader(pair.getKey(), val);
                       }
-                      ResponseBody resBody = response.body();
-                      String responseBodyText = resBody != null ? resBody.string() : "";
-                      Map<String, List<String>> resHeaders = new HashMap<>(response.headers().toMultimap());
-                      return new Response(response.code(), response.message(), resHeaders, responseBodyText, response.request().url().toString());
                   }
+
+                  okhttp3.Response response = client.newCall(builder.build()).execute();
+                  if (response.code() == 429) {
+                      response.close();
+                      throw new ReCaptchaException("reCaptcha required", url);
+                  }
+
+                  ResponseBody body = response.body();
+                  String responseBodyText = body != null ? body.string() : "";
+                  Headers headers = response.headers();
+                  Map<String, List<String>> responseHeaders = new HashMap<>(headers.toMultimap());
+
+                  return new Response(
+                          response.code(),
+                          response.message(),
+                          responseHeaders,
+                          responseBodyText,
+                          response.request().url().toString()
+                  );
               }
           }
           EOF
 
-          # 9. شاشة التطبيق الرئيسية (MainActivity.java) مع حماية الشاشة واستخراج الجودات
-          cat << 'EOF' > app/src/main/java/com/edall/app/MainActivity.java
+          # 6. WebAppInterface & Bridge
+          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/WebAppInterface.java
           package com.edall.app;
 
-          import android.content.pm.ActivityInfo;
-          import android.graphics.Bitmap;
-          import android.os.Bundle;
-          import android.view.View;
-          import android.view.WindowManager;
           import android.webkit.JavascriptInterface;
-          import android.webkit.WebChromeClient;
-          import android.webkit.WebResourceRequest;
-          import android.webkit.WebSettings;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
-          import androidx.appcompat.app.AppCompatActivity;
-
           import org.json.JSONArray;
           import org.json.JSONObject;
           import org.schabi.newpipe.extractor.NewPipe;
@@ -292,55 +214,177 @@ jobs:
           import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
 
+          import java.util.ArrayList;
           import java.util.Collections;
           import java.util.Comparator;
+          import java.util.HashMap;
           import java.util.List;
-          import java.util.concurrent.Callable;
-          import java.util.concurrent.ExecutorService;
-          import java.util.concurrent.Executors;
-          import java.util.concurrent.Future;
+          import java.util.Map;
+
+          public class WebAppInterface {
+              private final MainActivity activity;
+
+              public WebAppInterface(MainActivity activity) {
+                  this.activity = activity;
+              }
+
+              @JavascriptInterface
+              public boolean isApp() { return true; }
+
+              @JavascriptInterface
+              public boolean isAndroid() { return true; }
+
+              @JavascriptInterface
+              public void setFullscreen(boolean enabled) {
+                  activity.runOnUiThread(() -> activity.setDesktopFullscreen(enabled));
+              }
+
+              @JavascriptInterface
+              public String extractFormats(String videoId) {
+                  try {
+                      String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
+                      StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
+
+                      Map<Integer, VideoStream> bestByHeight = new HashMap<>();
+                      for (VideoStream vs : info.getVideoStreams()) {
+                          int h = vs.getHeight();
+                          if (h <= 0) continue;
+                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                              bestByHeight.put(h, vs);
+                          }
+                      }
+                      for (VideoStream vs : info.getVideoOnlyStreams()) {
+                          int h = vs.getHeight();
+                          if (h <= 0) continue;
+                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                              bestByHeight.put(h, vs);
+                          }
+                      }
+
+                      List<VideoStream> sortedVideos = new ArrayList<>(bestByHeight.values());
+                      Collections.sort(sortedVideos, (a, b) -> Integer.compare(b.getHeight(), a.getHeight()));
+
+                      AudioStream bestAudio = null;
+                      for (AudioStream as : info.getAudioStreams()) {
+                          if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
+                              bestAudio = as;
+                          }
+                      }
+
+                      JSONObject root = new JSONObject();
+                      root.put("title", info.getName() != null ? info.getName() : "Video");
+                      root.put("expiresAt", System.currentTimeMillis() + 6 * 3600 * 1000);
+
+                      JSONArray videosArr = new JSONArray();
+                      for (VideoStream vs : sortedVideos) {
+                          JSONObject vObj = new JSONObject();
+                          vObj.put("h", vs.getHeight());
+                          vObj.put("url", vs.getContent());
+                          vObj.put("hasAudio", !vs.isVideoOnly());
+                          videosArr.put(vObj);
+                      }
+                      root.put("videos", videosArr);
+
+                      if (bestAudio != null) {
+                          JSONObject aObj = new JSONObject();
+                          aObj.put("url", bestAudio.getContent());
+                          root.put("audio", aObj);
+                      }
+
+                      return root.toString();
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                      try {
+                          JSONObject err = new JSONObject();
+                          err.put("error", e.getMessage() != null ? e.getMessage() : "Extraction failed");
+                          return err.toString();
+                      } catch (Exception ignored) {
+                          return "{\"error\":\"Extraction failed\"}";
+                      }
+                  }
+              }
+          }
+          EOF
+
+          # 7. MainActivity
+          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
+          package com.edall.app;
+
+          import android.annotation.SuppressLint;
+          import android.content.pm.ActivityInfo;
+          import android.graphics.Bitmap;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.WindowInsets;
+          import android.view.WindowInsetsController;
+          import android.view.WindowManager;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.activity.OnBackPressedCallback;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          import org.schabi.newpipe.extractor.NewPipe;
+          import okhttp3.OkHttpClient;
 
           public class MainActivity extends AppCompatActivity {
               private WebView webView;
-              private final ExecutorService executor = Executors.newCachedThreadPool();
+              private static final String PLATFORM_URL = "https://edall.lovable.app/ed_master.html";
 
-              private static final String JS_SHIM =
+              private static final String JS_BRIDGE_SHIM =
                   "(function() {" +
-                  "  if (window.edallDesktop) return;" +
-                  "  window.edallAndroidApp = true;" +
+                  "  if (window._edallDesktopInjected) return;" +
+                  "  window._edallDesktopInjected = true;" +
+                  "  window.edallAndroid = {" +
+                  "    isApp: function() { return true; }," +
+                  "    isAndroid: function() { return true; }" +
+                  "  };" +
                   "  window.edallDesktop = {" +
                   "    isDesktop: true," +
                   "    isAndroid: true," +
-                  "    version: '2.0.0-android'," +
-                  "    getYoutubeFormats: function(videoId) {" +
+                  "    version: '3.0.0'," +
+                  "    getYoutubeFormats: function(vid, force) {" +
                   "      return new Promise(function(resolve, reject) {" +
-                  "        try {" +
-                  "          var raw = window.edallAndroid.getFormatsSync(videoId);" +
-                  "          if (!raw) { reject(new Error('Extraction failed')); return; }" +
-                  "          var parsed = JSON.parse(raw);" +
-                  "          if (parsed && parsed.error) { reject(new Error(parsed.error)); return; }" +
-                  "          resolve(parsed);" +
-                  "        } catch (e) { reject(e); }" +
+                  "        setTimeout(function() {" +
+                  "          try {" +
+                  "            var res = window.edallNative.extractFormats(vid);" +
+                  "            if (!res) { reject(new Error('No response from native extractor')); return; }" +
+                  "            var data = JSON.parse(res);" +
+                  "            if (data.error) { reject(new Error(data.error)); return; }" +
+                  "            if (data.videos && data.videos.length > 0) { resolve(data); }" +
+                  "            else { reject(new Error('No playable video streams')); }" +
+                  "          } catch(err) { reject(err); }" +
+                  "        }, 10);" +
                   "      });" +
                   "    }," +
                   "    setVideoFullscreen: function(enabled) {" +
-                  "      window.edallAndroid.setFullscreen(enabled === true);" +
+                  "      try { window.edallNative.setFullscreen(enabled === true); return Promise.resolve(true); }" +
+                  "      catch(e) { return Promise.resolve(false); }" +
                   "    }" +
                   "  };" +
+                  "  var hero = document.getElementById('desktopDownloadHero');" +
+                  "  if (hero) hero.style.display = 'none';" +
                   "})();";
 
+              @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  // منع تصوير الشاشة وتسجيل الفيديو
+                  // 1. Full anti-recording & anti-screenshot security
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
-                  // تهيئة محرك NewPipe
+                  // 2. Initialize NewPipe Extractor
                   try {
-                      NewPipe.init(new OkHttpDownloader());
+                      NewPipe.init(new OkHttpDownloader(new OkHttpClient()));
                   } catch (Exception ignored) {}
 
+                  // 3. Create & Configure WebView
                   webView = new WebView(this);
                   setContentView(webView);
 
@@ -351,147 +395,172 @@ jobs:
                   ws.setMediaPlaybackRequiresUserGesture(false);
                   ws.setAllowFileAccess(true);
                   ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/1.0 EdAllAndroidApp/2.0");
+                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/3.0 EdAllDesktop/2.0");
 
-                  webView.addJavascriptInterface(new WebAppInterface(), "edallAndroid");
+                  webView.addJavascriptInterface(new WebAppInterface(this), "edallNative");
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
                       public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                          view.evaluateJavascript(JS_SHIM, null);
+                          super.onPageStarted(view, url, favicon);
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      }
+
+                      @Override
+                      public void onPageCommitVisible(WebView view, String url) {
+                          super.onPageCommitVisible(view, url);
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
                       }
 
                       @Override
                       public void onPageFinished(WebView view, String url) {
-                          view.evaluateJavascript(JS_SHIM, null);
+                          super.onPageFinished(view, url);
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                          super.onReceivedError(view, request, error);
                       }
                   });
 
-                  webView.setWebChromeClient(new WebChromeClient());
-
-                  webView.loadUrl("https://edall.lovable.app/ed_master.html");
-              }
-
-              public class WebAppInterface {
-                  @JavascriptInterface
-                  public boolean isApp() { return true; }
-
-                  @JavascriptInterface
-                  public boolean isAndroid() { return true; }
-
-                  @JavascriptInterface
-                  public String getFormatsSync(String videoId) {
-                      Future<String> future = executor.submit(new Callable<String>() {
-                          @Override
-                          public String call() {
-                              try {
-                                  String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
-                                  StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
-
-                                  JSONObject result = new JSONObject();
-                                  result.put("title", info.getName());
-
-                                  String audioUrl = null;
-                                  List<AudioStream> audioStreams = info.getAudioStreams();
-                                  if (audioStreams != null && !audioStreams.isEmpty()) {
-                                      audioUrl = audioStreams.get(0).getContent();
-                                  }
-                                  result.put("audioUrl", audioUrl != null ? audioUrl : JSONObject.NULL);
-
-                                  JSONArray formats = new JSONArray();
-                                  List<VideoStream> videos = info.getVideoStreams();
-                                  if (videos != null) {
-                                      for (VideoStream v : videos) {
-                                          JSONObject item = new JSONObject();
-                                          item.put("quality", v.getResolution());
-                                          item.put("height", v.getHeight());
-                                          item.put("format_note", v.getResolution());
-                                          item.put("has_audio", !v.isVideoOnly());
-                                          item.put("url", v.getContent());
-                                          formats.put(item);
-                                      }
-                                  }
-
-                                  List<VideoStream> videoOnly = info.getVideoOnlyStreams();
-                                  if (videoOnly != null) {
-                                      for (VideoStream v : videoOnly) {
-                                          JSONObject item = new JSONObject();
-                                          item.put("quality", v.getResolution());
-                                          item.put("height", v.getHeight());
-                                          item.put("format_note", v.getResolution() + " (Adaptive)");
-                                          item.put("has_audio", false);
-                                          item.put("url", v.getContent());
-                                          formats.put(item);
-                                      }
-                                  }
-
-                                  result.put("formats", formats);
-                                  return result.toString();
-                              } catch (Exception e) {
-                                  return "{\"error\":\"" + e.getMessage() + "\"}";
-                              }
-                          }
-                      });
-
-                      try {
-                          return future.get();
-                      } catch (Exception e) {
-                          return "{\"error\":\"Extraction timeout\"}";
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(PermissionRequest request) {
+                          request.grant(request.getResources());
                       }
-                  }
+                  });
 
-                  @JavascriptInterface
-                  public void setFullscreen(final boolean enabled) {
-                      runOnUiThread(new Runnable() {
-                          @Override
-                          public void run() {
-                              if (enabled) {
-                                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                                  getWindow().getDecorView().setSystemUiVisibility(
-                                      View.SYSTEM_UI_FLAG_FULLSCREEN
-                                      | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                                      | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                  );
-                              } else {
-                                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
-                                  getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-                              }
+                  // 4. Handle Back button properly
+                  getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+                      @Override
+                      public void handleOnBackPressed() {
+                          if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
+                              setDesktopFullscreen(false);
+                          } else if (webView.canGoBack()) {
+                              webView.goBack();
+                          } else {
+                              finish();
                           }
-                      });
-                  }
+                      }
+                  });
+
+                  webView.loadUrl(PLATFORM_URL);
               }
 
-              @Override
-              public void onBackPressed() {
-                  if (webView.canGoBack()) {
-                      webView.goBack();
+              public void setDesktopFullscreen(boolean enabled) {
+                  if (enabled) {
+                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                          WindowInsetsController controller = getWindow().getInsetsController();
+                          if (controller != null) {
+                              controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                              controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                          }
+                      } else {
+                          getWindow().getDecorView().setSystemUiVisibility(
+                              View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                              | View.SYSTEM_UI_FLAG_FULLSCREEN
+                              | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                              | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                              | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                              | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                          );
+                      }
                   } else {
-                      super.onBackPressed();
+                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                          WindowInsetsController controller = getWindow().getInsetsController();
+                          if (controller != null) {
+                              controller.show(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                          }
+                      } else {
+                          getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                      }
                   }
               }
           }
           EOF
 
+          # 8. AndroidManifest.xml
+          cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="EdAll"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.AppCompat.NoActionBar"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+
+          </manifest>
+          EOF
+
+          # 9. Default app icon
+          mkdir -p android-project/app/src/main/res/mipmap-hdpi
+          curl -sL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png
+
+          # 10. Generate Gradle Wrapper 8.6
+          cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
+
       - name: Build Signed Release APK
+        working-directory: android-project
         run: |
           gradle assembleRelease --stacktrace
 
-      - name: Rename and Package APK
-        run: |
-          mkdir -p output
-          cp app/build/outputs/apk/release/app-release.apk output/EdAll.apk
+          # Find unsigned APK
+          APK_PATH=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
+          echo "Found APK at: $APK_PATH"
+
+          # Generate Release Keystore and Sign APK
+          keytool -genkey -v -keystore release.keystore -alias edall -keyalg RSA -keysize 2048 -validity 10000 -storepass edallpass -keypass edallpass -dname "CN=EdAll, OU=App, O=EdAll, L=Cairo, S=Cairo, C=EG"
+          
+          # Sign with jarsigner
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 -keystore release.keystore -storepass edallpass -keypass edallpass "$APK_PATH" edall
+
+          mkdir -p ../dist
+          cp "$APK_PATH" ../dist/EdAll.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: EdAll-Android-APK
-          path: output/EdAll.apk
+          path: dist/EdAll.apk
+          if-no-files-found: error
 
-      - name: Release APK
+      - name: Release APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         if: success()
         with:
           tag_name: Education
-          files: output/EdAll.apk
+          name: "EdAll Education Release"
+          files: dist/EdAll.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
