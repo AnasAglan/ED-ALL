@@ -3,45 +3,51 @@ name: Build EdAll Android App (APK)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
           distribution: 'temurin'
+          java-version: '17'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.6'
 
-      - name: Download Offline Platform Snapshot
+      - name: Accept Android SDK Licenses
         run: |
-          mkdir -p android-project/app/src/main/assets
-          curl -s -L "https://edall.lovable.app/ed_master.html" -o android-project/app/src/main/assets/platform.html
-          echo "Downloaded snapshot size: $(wc -c < android-project/app/src/main/assets/platform.html) bytes"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Create Android Project Files
+      - name: Scaffold Android Native Project
         run: |
-          mkdir -p android-project/app/src/main/java/com/edall/app
-          mkdir -p android-project/app/src/main/res/values
+          mkdir -p app/src/main/java/com/edall/app
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/mipmap-xxhdpi
+          mkdir -p app/src/main/res/drawable
 
-          # 1. gradle.properties
-          cat << 'EOF' > android-project/gradle.properties
+          # 1. تحميل أيقونة المنصة الرسمية
+          curl -sL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+
+          # 2. إعدادات Gradle العامة (gradle.properties)
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
           android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx2048m
+          android.nonTransitiveRClass=true
           EOF
 
-          # 2. settings.gradle
-          cat << 'EOF' > android-project/settings.gradle
+          # 3. إعدادات المشروع والمستودعات (settings.gradle)
+          cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories {
                   google()
@@ -50,7 +56,7 @@ jobs:
               }
           }
           dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
               repositories {
                   google()
                   mavenCentral()
@@ -61,17 +67,33 @@ jobs:
           include ':app'
           EOF
 
-          # 3. Project build.gradle
-          cat << 'EOF' > android-project/build.gradle
+          # 4. ملف البناء الرئيسي (build.gradle) - تم إصلاح المستودعات هنا
+          cat << 'EOF' > build.gradle
           buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
               dependencies {
                   classpath 'com.android.tools.build:gradle:8.2.2'
               }
           }
+
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url 'https://jitpack.io' }
+              }
+          }
+
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
           EOF
 
-          # 4. App build.gradle (With NewPipeExtractor & OkHttp)
-          cat << 'EOF' > android-project/app/build.gradle
+          # 5. ملف بناء التطبيق (app/build.gradle)
+          cat << 'EOF' > app/build.gradle
           plugins {
               id 'com.android.application'
           }
@@ -92,17 +114,13 @@ jobs:
                   release {
                       minifyEnabled false
                       shrinkResources false
+                      signingConfig signingConfigs.debug
                   }
               }
 
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
-              }
-
-              lint {
-                  abortOnError false
-                  checkReleaseBuilds false
               }
 
               packaging {
@@ -115,10 +133,15 @@ jobs:
                           'META-INF/NOTICE',
                           'META-INF/NOTICE.txt',
                           'META-INF/notice.txt',
-                          'META-INF/ASL2.0',
-                          'META-INF/*.kotlin_module'
+                          'META-INF/INDEX.LIST',
+                          'META-INF/INDEX.list'
                       ]
                   }
+              }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
               }
           }
 
@@ -129,40 +152,29 @@ jobs:
           }
           EOF
 
-          # 5. Strings & Themes
-          cat << 'EOF' > android-project/app/src/main/res/values/strings.xml
-          <resources>
-              <string name="app_name">ED ALL</string>
-          </resources>
-          EOF
-
-          cat << 'EOF' > android-project/app/src/main/res/values/styles.xml
-          <resources>
-              <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
-                  <item name="android:windowBackground">#0f172a</item>
-                  <item name="android:navigationBarColor">#0f172a</item>
-                  <item name="android:statusBarColor">#0f172a</item>
-              </style>
-          </resources>
-          EOF
-
-          # 6. AndroidManifest.xml
-          cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
+          # 6. ملف البيان والأذونات (AndroidManifest.xml)
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
               <application
-                  android:allowBackup="true"
-                  android:label="@string/app_name"
+                  android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="EdAll"
+                  android:roundIcon="@mipmap/ic_launcher"
                   android:supportsRtl="true"
                   android:theme="@style/AppTheme"
                   android:hardwareAccelerated="true"
                   android:usesCleartextTraffic="true">
+
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -172,8 +184,25 @@ jobs:
           </manifest>
           EOF
 
-          # 7. OkHttpDownloader.java (NewPipe Downloader implementation)
-          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
+          # 7. الثيم والألوان (res/values/styles.xml & strings.xml)
+          cat << 'EOF' > app/src/main/res/values/styles.xml
+          <resources>
+              <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+                  <item name="android:windowBackground">#0F172A</item>
+                  <item name="android:statusBarColor">#0F172A</item>
+                  <item name="android:navigationBarColor">#0F172A</item>
+              </style>
+          </resources>
+          EOF
+
+          cat << 'EOF' > app/src/main/res/values/strings.xml
+          <resources>
+              <string name="app_name">EdAll</string>
+          </resources>
+          EOF
+
+          # 8. محرك تحميل NewPipe (OkHttpDownloader.java)
+          cat << 'EOF' > app/src/main/java/com/edall/app/OkHttpDownloader.java
           package com.edall.app;
 
           import org.schabi.newpipe.extractor.downloader.Downloader;
@@ -182,63 +211,68 @@ jobs:
           import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
 
           import java.io.IOException;
+          import java.util.HashMap;
           import java.util.List;
           import java.util.Map;
           import java.util.concurrent.TimeUnit;
 
+          import okhttp3.Headers;
           import okhttp3.OkHttpClient;
           import okhttp3.RequestBody;
+          import okhttp3.ResponseBody;
 
           public class OkHttpDownloader extends Downloader {
-              private final OkHttpClient client = new OkHttpClient.Builder()
-                      .connectTimeout(15, TimeUnit.SECONDS)
-                      .readTimeout(20, TimeUnit.SECONDS)
-                      .build();
+              private final OkHttpClient client;
+
+              public OkHttpDownloader() {
+                  this.client = new OkHttpClient.Builder()
+                          .connectTimeout(30, TimeUnit.SECONDS)
+                          .readTimeout(30, TimeUnit.SECONDS)
+                          .build();
+              }
 
               @Override
               public Response execute(Request request) throws IOException, ReCaptchaException {
                   String httpMethod = request.httpMethod();
                   String url = request.url();
-                  Map<String, List<String>> headers = request.headers();
-                  byte[] dataToSend = request.dataToSend();
-
-                  okhttp3.Request.Builder builder = new okhttp3.Request.Builder().url(url);
-                  if (headers != null) {
-                      for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-                          for (String value : entry.getValue()) {
-                              builder.addHeader(entry.getKey(), value);
+                  Headers.Builder headersBuilder = new Headers.Builder();
+                  if (request.headers() != null) {
+                      for (Map.Entry<String, List<String>> entry : request.headers().entrySet()) {
+                          for (String val : entry.getValue()) {
+                              headersBuilder.add(entry.getKey(), val);
                           }
                       }
                   }
 
-                  if ("POST".equalsIgnoreCase(httpMethod)) {
-                      RequestBody body = RequestBody.create(dataToSend != null ? dataToSend : new byte[0]);
-                      builder.post(body);
-                  } else if ("HEAD".equalsIgnoreCase(httpMethod)) {
-                      builder.head();
-                  } else {
-                      builder.get();
+                  RequestBody body = null;
+                  if (request.dataToSend() != null) {
+                      body = RequestBody.create(request.dataToSend(), null);
                   }
 
-                  okhttp3.Response response = client.newCall(builder.build()).execute();
-                  int code = response.code();
-                  String message = response.message();
-                  Map<String, List<String>> resHeaders = response.headers().toMultimap();
-                  String body = response.body() != null ? response.body().string() : "";
-                  String latestUrl = response.request().url().toString();
+                  okhttp3.Request.Builder okReq = new okhttp3.Request.Builder()
+                          .url(url)
+                          .headers(headersBuilder.build())
+                          .method(httpMethod, body);
 
-                  return new Response(code, message, resHeaders, body, latestUrl);
+                  try (okhttp3.Response response = client.newCall(okReq.build()).execute()) {
+                      if (response.code() == 429) {
+                          throw new ReCaptchaException("reCAPTCHA requested", url);
+                      }
+                      ResponseBody resBody = response.body();
+                      String responseBodyText = resBody != null ? resBody.string() : "";
+                      Map<String, List<String>> resHeaders = new HashMap<>(response.headers().toMultimap());
+                      return new Response(response.code(), response.message(), resHeaders, responseBodyText, response.request().url().toString());
+                  }
               }
           }
           EOF
 
-          # 8. MainActivity.java (With NewPipeExtractor & window.edallDesktop Bridge)
-          cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
+          # 9. شاشة التطبيق الرئيسية (MainActivity.java) مع حماية الشاشة واستخراج الجودات
+          cat << 'EOF' > app/src/main/java/com/edall/app/MainActivity.java
           package com.edall.app;
 
-          import android.annotation.SuppressLint;
           import android.content.pm.ActivityInfo;
-          import android.os.Build;
+          import android.graphics.Bitmap;
           import android.os.Bundle;
           import android.view.View;
           import android.view.WindowManager;
@@ -253,69 +287,59 @@ jobs:
           import org.json.JSONArray;
           import org.json.JSONObject;
           import org.schabi.newpipe.extractor.NewPipe;
+          import org.schabi.newpipe.extractor.ServiceList;
           import org.schabi.newpipe.extractor.stream.AudioStream;
           import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
 
-          import java.util.ArrayList;
           import java.util.Collections;
-          import java.util.HashMap;
+          import java.util.Comparator;
           import java.util.List;
-          import java.util.Map;
+          import java.util.concurrent.Callable;
           import java.util.concurrent.ExecutorService;
           import java.util.concurrent.Executors;
           import java.util.concurrent.Future;
-          import java.util.concurrent.TimeUnit;
 
           public class MainActivity extends AppCompatActivity {
               private WebView webView;
-              private static boolean newPipeInitialized = false;
-              private final ExecutorService executor = Executors.newFixedThreadPool(2);
+              private final ExecutorService executor = Executors.newCachedThreadPool();
 
-              private static final String JS_BRIDGE_SHIM = 
-                  "javascript:(function() {" +
-                  "  if (!window.edallDesktop) {" +
-                  "    window.edallDesktop = {" +
-                  "      isDesktop: true," +
-                  "      isAndroid: true," +
-                  "      version: '2.0.0'," +
-                  "      getYoutubeFormats: function(vid, force) {" +
-                  "        return new Promise(function(resolve, reject) {" +
-                  "          try {" +
-                  "            var raw = window.edallAndroid.getFormatsSync(vid);" +
-                  "            var parsed = JSON.parse(raw);" +
-                  "            if (parsed.error) reject(new Error(parsed.error));" +
-                  "            else resolve(parsed);" +
-                  "          } catch(e) { reject(e); }" +
-                  "        });" +
-                  "      }," +
-                  "      setVideoFullscreen: function(enabled) {" +
+              private static final String JS_SHIM =
+                  "(function() {" +
+                  "  if (window.edallDesktop) return;" +
+                  "  window.edallAndroidApp = true;" +
+                  "  window.edallDesktop = {" +
+                  "    isDesktop: true," +
+                  "    isAndroid: true," +
+                  "    version: '2.0.0-android'," +
+                  "    getYoutubeFormats: function(videoId) {" +
+                  "      return new Promise(function(resolve, reject) {" +
                   "        try {" +
-                  "          if (window.edallAndroid && window.edallAndroid.setFullscreen) {" +
-                  "            window.edallAndroid.setFullscreen(enabled === true);" +
-                  "          }" +
-                  "        } catch(e) {}" +
-                  "        return Promise.resolve(true);" +
-                  "      }" +
-                  "    };" +
-                  "  }" +
-                  "  var btn = document.getElementById('desktopDownloadHero');" +
-                  "  if (btn) btn.style.display = 'none';" +
-                  "})()";
+                  "          var raw = window.edallAndroid.getFormatsSync(videoId);" +
+                  "          if (!raw) { reject(new Error('Extraction failed')); return; }" +
+                  "          var parsed = JSON.parse(raw);" +
+                  "          if (parsed && parsed.error) { reject(new Error(parsed.error)); return; }" +
+                  "          resolve(parsed);" +
+                  "        } catch (e) { reject(e); }" +
+                  "      });" +
+                  "    }," +
+                  "    setVideoFullscreen: function(enabled) {" +
+                  "      window.edallAndroid.setFullscreen(enabled === true);" +
+                  "    }" +
+                  "  };" +
+                  "})();";
 
-              @SuppressLint("SetJavaScriptEnabled")
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  // 1. Block screenshots and screen recordings
+                  // منع تصوير الشاشة وتسجيل الفيديو
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
-                  // 2. Initialize NewPipe Extractor
-                  if (!newPipeInitialized) {
+                  // تهيئة محرك NewPipe
+                  try {
                       NewPipe.init(new OkHttpDownloader());
-                      newPipeInitialized = true;
-                  }
+                  } catch (Exception ignored) {}
 
                   webView = new WebView(this);
                   setContentView(webView);
@@ -324,29 +348,22 @@ jobs:
                   ws.setJavaScriptEnabled(true);
                   ws.setDomStorageEnabled(true);
                   ws.setDatabaseEnabled(true);
-                  ws.setAllowFileAccess(true);
                   ws.setMediaPlaybackRequiresUserGesture(false);
-                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/2.0");
+                  ws.setAllowFileAccess(true);
+                  ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/1.0 EdAllAndroidApp/2.0");
 
-                  // 3. Register Native Javascript Interface
                   webView.addJavascriptInterface(new WebAppInterface(), "edallAndroid");
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
-                      public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                          view.evaluateJavascript(JS_SHIM, null);
                       }
 
                       @Override
                       public void onPageFinished(WebView view, String url) {
-                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
-                      }
-
-                      @Override
-                      public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
-                          if (request.isForMainFrame()) {
-                              view.loadUrl("file:///android_asset/platform.html");
-                          }
+                          view.evaluateJavascript(JS_SHIM, null);
                       }
                   });
 
@@ -364,87 +381,89 @@ jobs:
 
                   @JavascriptInterface
                   public String getFormatsSync(String videoId) {
+                      Future<String> future = executor.submit(new Callable<String>() {
+                          @Override
+                          public String call() {
+                              try {
+                                  String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
+                                  StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
+
+                                  JSONObject result = new JSONObject();
+                                  result.put("title", info.getName());
+
+                                  String audioUrl = null;
+                                  List<AudioStream> audioStreams = info.getAudioStreams();
+                                  if (audioStreams != null && !audioStreams.isEmpty()) {
+                                      audioUrl = audioStreams.get(0).getContent();
+                                  }
+                                  result.put("audioUrl", audioUrl != null ? audioUrl : JSONObject.NULL);
+
+                                  JSONArray formats = new JSONArray();
+                                  List<VideoStream> videos = info.getVideoStreams();
+                                  if (videos != null) {
+                                      for (VideoStream v : videos) {
+                                          JSONObject item = new JSONObject();
+                                          item.put("quality", v.getResolution());
+                                          item.put("height", v.getHeight());
+                                          item.put("format_note", v.getResolution());
+                                          item.put("has_audio", !v.isVideoOnly());
+                                          item.put("url", v.getContent());
+                                          formats.put(item);
+                                      }
+                                  }
+
+                                  List<VideoStream> videoOnly = info.getVideoOnlyStreams();
+                                  if (videoOnly != null) {
+                                      for (VideoStream v : videoOnly) {
+                                          JSONObject item = new JSONObject();
+                                          item.put("quality", v.getResolution());
+                                          item.put("height", v.getHeight());
+                                          item.put("format_note", v.getResolution() + " (Adaptive)");
+                                          item.put("has_audio", false);
+                                          item.put("url", v.getContent());
+                                          formats.put(item);
+                                      }
+                                  }
+
+                                  result.put("formats", formats);
+                                  return result.toString();
+                              } catch (Exception e) {
+                                  return "{\"error\":\"" + e.getMessage() + "\"}";
+                              }
+                          }
+                      });
+
                       try {
-                          Future<String> future = executor.submit(() -> extractFormats(videoId));
-                          return future.get(25, TimeUnit.SECONDS);
+                          return future.get();
                       } catch (Exception e) {
-                          return "{\"error\":\"" + e.getMessage() + "\"}";
+                          return "{\"error\":\"Extraction timeout\"}";
                       }
                   }
 
                   @JavascriptInterface
-                  public void setFullscreen(boolean fullscreen) {
-                      runOnUiThread(() -> {
-                          if (fullscreen) {
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                              getWindow().getDecorView().setSystemUiVisibility(
-                                  View.SYSTEM_UI_FLAG_FULLSCREEN |
-                                  View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
-                                  View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
-                                  View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
-                                  View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                              );
-                          } else {
-                              setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-                              getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                  public void setFullscreen(final boolean enabled) {
+                      runOnUiThread(new Runnable() {
+                          @Override
+                          public void run() {
+                              if (enabled) {
+                                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                                  getWindow().getDecorView().setSystemUiVisibility(
+                                      View.SYSTEM_UI_FLAG_FULLSCREEN
+                                      | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                      | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                  );
+                              } else {
+                                  setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                                  getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                              }
                           }
                       });
                   }
               }
 
-              private String extractFormats(String videoId) {
-                  try {
-                      String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
-                      StreamInfo info = StreamInfo.getInfo(watchUrl);
-
-                      JSONObject result = new JSONObject();
-                      result.put("title", info.getName());
-
-                      Map<Integer, VideoStream> bestVideos = new HashMap<>();
-                      List<VideoStream> candidates = new ArrayList<>();
-                      if (info.getVideoStreams() != null) candidates.addAll(info.getVideoStreams());
-                      if (info.getVideoOnlyStreams() != null) candidates.addAll(info.getVideoOnlyStreams());
-
-                      for (VideoStream vs : candidates) {
-                          int h = vs.getHeight();
-                          if (h <= 0) continue;
-                          if (!bestVideos.containsKey(h)) {
-                              bestVideos.put(h, vs);
-                          }
-                      }
-
-                      List<Integer> heights = new ArrayList<>(bestVideos.keySet());
-                      Collections.sort(heights, Collections.reverseOrder());
-
-                      JSONArray videosArray = new JSONArray();
-                      for (int h : heights) {
-                          VideoStream vs = bestVideos.get(h);
-                          JSONObject v = new JSONObject();
-                          v.put("h", h);
-                          v.put("url", vs.getContent());
-                          v.put("hasAudio", !vs.isVideoOnly());
-                          videosArray.put(v);
-                      }
-                      result.put("videos", videosArray);
-
-                      if (info.getAudioStreams() != null && !info.getAudioStreams().isEmpty()) {
-                          AudioStream bestAudio = info.getAudioStreams().get(0);
-                          JSONObject a = new JSONObject();
-                          a.put("url", bestAudio.getContent());
-                          result.put("audio", a);
-                      } else {
-                          result.put("audio", JSONObject.NULL);
-                      }
-
-                      return result.toString();
-                  } catch (Exception e) {
-                      return "{\"error\":\"" + e.getMessage() + "\"}";
-                  }
-              }
-
               @Override
               public void onBackPressed() {
-                  if (webView != null && webView.canGoBack()) {
+                  if (webView.canGoBack()) {
                       webView.goBack();
                   } else {
                       super.onBackPressed();
@@ -455,14 +474,12 @@ jobs:
 
       - name: Build Signed Release APK
         run: |
-          cd android-project
-          chmod +x gradlew || true
-          gradle assembleRelease
+          gradle assembleRelease --stacktrace
 
       - name: Rename and Package APK
         run: |
           mkdir -p output
-          cp android-project/app/build/outputs/apk/release/app-release-unsigned.apk output/EdAll.apk
+          cp app/build/outputs/apk/release/app-release.apk output/EdAll.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -472,10 +489,9 @@ jobs:
 
       - name: Release APK
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        if: success()
         with:
           tag_name: Education
-          name: EdAll Platform Education Release
           files: output/EdAll.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
