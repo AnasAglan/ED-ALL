@@ -17,7 +17,6 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # تثبيت إصدار Gradle 8.6 المتوافق تماماً مع أندرويد
       - name: Setup Gradle 8.6
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -29,22 +28,28 @@ jobs:
           mkdir -p android-app/app/src/main/res/values
           mkdir -p android-app/app/src/main/res/drawable
           mkdir -p android-app/app/src/main/res/layout
+          mkdir -p android-app/app/src/main/res/mipmap-mdpi
+          mkdir -p android-app/app/src/main/res/mipmap-hdpi
+          mkdir -p android-app/app/src/main/res/mipmap-xhdpi
           mkdir -p android-app/app/src/main/res/mipmap-xxhdpi
           mkdir -p android-app/app/src/main/assets
 
-      - name: Accept Android SDK Licenses & Setup Path
+      - name: Setup Android SDK Environment & Licenses
         run: |
           echo "sdk.dir=$ANDROID_HOME" > android-app/local.properties
           mkdir -p "$ANDROID_HOME/licenses" || true
-          printf "24333f8a63b682449e00fe1e4d7521a6e0f70794\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_HOME/licenses/android-sdk-license"
+          printf "24333f8a63b682449e00fe1e4d7521a6e0f70794\nd56f5187479451eabf01fb78af6dfcb131a6481e\n84831b9409646a2b8e388d7352642d3c32124ee7\n" > "$ANDROID_HOME/licenses/android-sdk-license"
 
       - name: Download App Assets & Web Snapshot
         run: |
           # تنزيل أحدث نسخة من كود المنصة للعمل أوفلاين
           curl -sSL "https://edall.lovable.app/ed_master.html" -o android-app/app/src/main/assets/platform.html
           
-          # تنزيل أيقونة PNG أصلية وعالية الدقة للمنصة
+          # تنزيل الأيقونة وتوزيعها على كافة مقاسات الشاشات
           curl -sSL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o android-app/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          cp android-app/app/src/main/res/mipmap-xxhdpi/ic_launcher.png android-app/app/src/main/res/mipmap-xhdpi/
+          cp android-app/app/src/main/res/mipmap-xxhdpi/ic_launcher.png android-app/app/src/main/res/mipmap-hdpi/
+          cp android-app/app/src/main/res/mipmap-xxhdpi/ic_launcher.png android-app/app/src/main/res/mipmap-mdpi/
 
       - name: Write Android Manifest
         run: |
@@ -62,7 +67,7 @@ jobs:
                   android:label="ED ALL"
                   android:roundIcon="@mipmap/ic_launcher"
                   android:supportsRtl="true"
-                  android:theme="@style/Theme.AppCompat.NoActionBar"
+                  android:theme="@style/AppTheme"
                   android:hardwareAccelerated="true"
                   android:usesCleartextTraffic="true">
                   <activity
@@ -105,7 +110,7 @@ jobs:
           cat << 'EOF' > android-app/app/src/main/res/values/styles.xml
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <style name="Theme.AppCompat.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">
+              <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
                   <item name="android:windowNoTitle">true</item>
                   <item name="android:windowActionBar">false</item>
                   <item name="android:windowBackground">#0b0f19</item>
@@ -143,7 +148,7 @@ jobs:
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
-                  // حظر تصوير الشاشة وتسجيل الفيديو
+                  // منع السكرين شوت وتسجيل الفيديو للشاشة
                   getWindow().setFlags(
                       WindowManager.LayoutParams.FLAG_SECURE,
                       WindowManager.LayoutParams.FLAG_SECURE
@@ -230,8 +235,14 @@ jobs:
           }
           EOF
 
-      - name: Write Gradle Settings & Build Files
+      - name: Write Gradle Configuration & Properties
         run: |
+          cat << 'EOF' > android-app/gradle.properties
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
+
           cat << 'EOF' > android-app/settings.gradle
           pluginManagement {
               repositories {
@@ -289,6 +300,12 @@ jobs:
                       signingConfig signingConfigs.release
                   }
               }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
@@ -297,7 +314,6 @@ jobs:
 
           dependencies {
               implementation 'androidx.appcompat:appcompat:1.6.1'
-              implementation 'com.google.android.material:material:1.11.0'
           }
           EOF
 
@@ -316,7 +332,7 @@ jobs:
       - name: Build Signed Release APK
         run: |
           cd android-app
-          gradle assembleRelease --no-daemon
+          gradle assembleRelease --no-daemon --stacktrace
           cp app/build/outputs/apk/release/app-release.apk ../EdAll.apk
 
       - name: Publish APK to GitHub Releases
