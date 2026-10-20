@@ -3,38 +3,39 @@ name: Build EdAll Android App (APK)
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - '.github/workflows/build-android.yml'
 
-# Required by softprops/action-gh-release to create or update the release.
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
-
-concurrency:
-  group: edall-android-${{ github.ref }}
-  cancel-in-progress: false
 
 env:
   ANDROID_API_LEVEL: '34'
   ANDROID_BUILD_TOOLS: '34.0.0'
+  JAVA_VERSION: '17'
+  RELEASE_TAG: 'Education'
 
 jobs:
-  build-apk:
-    name: Build Integrated Android App (Release APK)
+  build:
+    name: Build & Release Android APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up JDK 17
+      - name: Set up Java JDK
         uses: actions/setup-java@v6
         with:
-          distribution: temurin
-          java-version: '17'
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
 
-      # `tools` is obsolete and must not be installed. setup-android v4 also
-      # installs the command-line tools required by sdkmanager and apksigner.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
@@ -44,30 +45,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          yes | sdkmanager --licenses || true
           sdkmanager --install \
             "platforms;android-${ANDROID_API_LEVEL}" \
             "build-tools;${ANDROID_BUILD_TOOLS}"
 
-      - name: Scaffold complete Android project
+      - name: Scaffold Android project structure
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p android-project/app/src/main/java/com/edall/app
           mkdir -p android-project/app/src/main/res/values
-          mkdir -p android-project/app/src/main/res/drawable
           mkdir -p android-project/app/src/main/res/mipmap-hdpi
           mkdir -p android-project/gradle/wrapper
 
-          # 1. Gradle properties
-          cat << 'EOF' > android-project/gradle.properties
-          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
-          android.useAndroidX=true
-          android.enableJetifier=true
-          android.nonTransitiveRClass=true
-          EOF
-
-          # 2. Gradle settings
+          # 1. settings.gradle
           cat << 'EOF' > android-project/settings.gradle
           pluginManagement {
               repositories {
@@ -88,21 +80,25 @@ jobs:
           include ':app'
           EOF
 
-          # 3. Root Gradle build file. Giving the plugin an explicit version
-          # avoids relying on a deprecated buildscript classpath lookup.
+          # 2. Root build.gradle
           cat << 'EOF' > android-project/build.gradle
           plugins {
               id 'com.android.application' version '8.2.2' apply false
           }
           EOF
 
-          # 4. App Gradle build file
+          # 3. gradle.properties
+          cat << 'EOF' > android-project/gradle.properties
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
+          # 4. app/build.gradle
           cat << 'EOF' > android-project/app/build.gradle
           plugins {
               id 'com.android.application'
           }
-
-          def ciBuildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
 
           android {
               namespace 'com.edall.app'
@@ -112,12 +108,8 @@ jobs:
                   applicationId "com.edall.app"
                   minSdk 24
                   targetSdk 34
-                  // A monotonically increasing code prevents a valid update
-                  // from being rejected as a version downgrade.
-                  versionCode 100000 + ciBuildNumber
-                  versionName "3.0.${ciBuildNumber}"
-
-                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+                  versionCode 100000 + Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")
+                  versionName "3.0.0"
               }
 
               buildTypes {
@@ -153,33 +145,57 @@ jobs:
           }
           EOF
 
-          # 5. OkHttp downloader for NewPipe
+          # 5. OkHttp Downloader with Cookie Support & POST Fix
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
           package com.edall.app;
 
+          import androidx.annotation.NonNull;
           import org.schabi.newpipe.extractor.downloader.Downloader;
           import org.schabi.newpipe.extractor.downloader.Request;
           import org.schabi.newpipe.extractor.downloader.Response;
           import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
 
           import java.io.IOException;
+          import java.util.Collections;
           import java.util.HashMap;
           import java.util.List;
           import java.util.Map;
+          import java.util.concurrent.ConcurrentHashMap;
           import java.util.concurrent.TimeUnit;
 
+          import okhttp3.Cookie;
+          import okhttp3.CookieJar;
           import okhttp3.Headers;
+          import okhttp3.HttpUrl;
           import okhttp3.OkHttpClient;
           import okhttp3.RequestBody;
           import okhttp3.ResponseBody;
 
           public class OkHttpDownloader extends Downloader {
-              private final OkHttpClient client;
+              private static final String DEFAULT_USER_AGENT =
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
-              public OkHttpDownloader(OkHttpClient client) {
-                  this.client = client.newBuilder()
-                          .connectTimeout(20, TimeUnit.SECONDS)
-                          .readTimeout(25, TimeUnit.SECONDS)
+              private final OkHttpClient client;
+              private final Map<String, List<Cookie>> cookieStore = new ConcurrentHashMap<>();
+
+              public OkHttpDownloader() {
+                  this.client = new OkHttpClient.Builder()
+                          .cookieJar(new CookieJar() {
+                              @Override
+                              public void saveFromResponse(@NonNull HttpUrl url, @NonNull List<Cookie> cookies) {
+                                  cookieStore.put(url.host(), cookies);
+                              }
+                              @NonNull
+                              @Override
+                              public List<Cookie> loadForRequest(@NonNull HttpUrl url) {
+                                  List<Cookie> cookies = cookieStore.get(url.host());
+                                  return cookies != null ? cookies : Collections.emptyList();
+                              }
+                          })
+                          .connectTimeout(25, TimeUnit.SECONDS)
+                          .readTimeout(30, TimeUnit.SECONDS)
+                          .followRedirects(true)
+                          .followSslRedirects(true)
                           .build();
               }
 
@@ -190,14 +206,17 @@ jobs:
                   byte[] dataToSend = request.dataToSend();
 
                   RequestBody requestBody = null;
-                  if (dataToSend != null) {
+                  if ("POST".equalsIgnoreCase(method)) {
+                      requestBody = RequestBody.create(dataToSend != null ? dataToSend : new byte[0], null);
+                  } else if (dataToSend != null) {
                       requestBody = RequestBody.create(dataToSend, null);
                   }
 
                   okhttp3.Request.Builder builder = new okhttp3.Request.Builder()
                           .method(method, requestBody)
                           .url(url)
-                          .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+                          .addHeader("User-Agent", DEFAULT_USER_AGENT)
+                          .addHeader("Accept-Language", "en-US,en;q=0.9");
 
                   for (Map.Entry<String, List<String>> pair : request.headers().entrySet()) {
                       builder.removeHeader(pair.getKey());
@@ -228,14 +247,15 @@ jobs:
           }
           EOF
 
-          # 6. Web app interface and JavaScript bridge
+          # 6. WebAppInterface with Robust Extraction
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/WebAppInterface.java
           package com.edall.app;
 
           import android.webkit.JavascriptInterface;
           import org.json.JSONArray;
           import org.json.JSONObject;
-          import org.schabi.newpipe.extractor.ServiceList;
+          import org.schabi.newpipe.extractor.NewPipe;
+          import org.schabi.newpipe.extractor.StreamingService;
           import org.schabi.newpipe.extractor.stream.AudioStream;
           import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
@@ -268,21 +288,32 @@ jobs:
               public String extractFormats(String videoId) {
                   try {
                       String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
-                      StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
+                      StreamingService service = NewPipe.getServiceByUrl(watchUrl);
+                      StreamInfo info = StreamInfo.getInfo(service, watchUrl);
 
                       Map<Integer, VideoStream> bestByHeight = new HashMap<>();
-                      for (VideoStream vs : info.getVideoStreams()) {
-                          int h = vs.getHeight();
-                          if (h <= 0) continue;
-                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
-                              bestByHeight.put(h, vs);
+
+                      // 1. Check progressive streams (video + audio)
+                      if (info.getVideoStreams() != null) {
+                          for (VideoStream vs : info.getVideoStreams()) {
+                              int h = vs.getHeight();
+                              String url = vs.getContent();
+                              if (h <= 0 || url == null || !url.startsWith("http")) continue;
+                              if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                                  bestByHeight.put(h, vs);
+                              }
                           }
                       }
-                      for (VideoStream vs : info.getVideoOnlyStreams()) {
-                          int h = vs.getHeight();
-                          if (h <= 0) continue;
-                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
-                              bestByHeight.put(h, vs);
+
+                      // 2. Check video-only streams (1080p, 720p, 480p)
+                      if (info.getVideoOnlyStreams() != null) {
+                          for (VideoStream vs : info.getVideoOnlyStreams()) {
+                              int h = vs.getHeight();
+                              String url = vs.getContent();
+                              if (h <= 0 || url == null || !url.startsWith("http")) continue;
+                              if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                                  bestByHeight.put(h, vs);
+                              }
                           }
                       }
 
@@ -290,10 +321,20 @@ jobs:
                       Collections.sort(sortedVideos, (a, b) -> Integer.compare(b.getHeight(), a.getHeight()));
 
                       AudioStream bestAudio = null;
-                      for (AudioStream as : info.getAudioStreams()) {
-                          if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
-                              bestAudio = as;
+                      if (info.getAudioStreams() != null) {
+                          for (AudioStream as : info.getAudioStreams()) {
+                              String url = as.getContent();
+                              if (url == null || !url.startsWith("http")) continue;
+                              if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
+                                  bestAudio = as;
+                              }
                           }
+                      }
+
+                      if (sortedVideos.isEmpty()) {
+                          JSONObject err = new JSONObject();
+                          err.put("error", "No playable streams found for this video");
+                          return err.toString();
                       }
 
                       JSONObject root = new JSONObject();
@@ -321,7 +362,7 @@ jobs:
                       e.printStackTrace();
                       try {
                           JSONObject err = new JSONObject();
-                          err.put("error", e.getMessage() != null ? e.getMessage() : "Extraction failed");
+                          err.put("error", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
                           return err.toString();
                       } catch (Exception ignored) {
                           return "{\"error\":\"Extraction failed\"}";
@@ -331,7 +372,7 @@ jobs:
           }
           EOF
 
-          # 7. Main activity
+          # 7. MainActivity
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
           package com.edall.app;
 
@@ -355,7 +396,8 @@ jobs:
           import androidx.appcompat.app.AppCompatActivity;
 
           import org.schabi.newpipe.extractor.NewPipe;
-          import okhttp3.OkHttpClient;
+          import org.schabi.newpipe.extractor.localization.ContentCountry;
+          import org.schabi.newpipe.extractor.localization.Localization;
 
           public class MainActivity extends AppCompatActivity {
               private WebView webView;
@@ -404,8 +446,13 @@ jobs:
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
                   try {
-                      NewPipe.init(new OkHttpDownloader(new OkHttpClient()));
-                  } catch (Exception ignored) {
+                      NewPipe.init(
+                          new OkHttpDownloader(),
+                          new Localization("en", "US"),
+                          new ContentCountry("US")
+                      );
+                  } catch (Exception e) {
+                      e.printStackTrace();
                   }
 
                   webView = new WebView(this);
@@ -457,22 +504,33 @@ jobs:
                   getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
                       @Override
                       public void handleOnBackPressed() {
-                          if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
+                          if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE) {
                               setDesktopFullscreen(false);
-                          } else if (webView.canGoBack()) {
+                          } else if (webView != null && webView.canGoBack()) {
                               webView.goBack();
                           } else {
-                              finish();
+                              setEnabled(false);
+                              getOnBackPressedDispatcher().onBackPressed();
                           }
                       }
                   });
 
-                  webView.loadUrl(PLATFORM_URL);
+                  if (savedInstanceState == null) {
+                      webView.loadUrl(PLATFORM_URL);
+                  } else {
+                      webView.restoreState(savedInstanceState);
+                  }
+              }
+
+              @Override
+              protected void onSaveInstanceState(Bundle outState) {
+                  super.onSaveInstanceState(outState);
+                  if (webView != null) webView.saveState(outState);
               }
 
               public void setDesktopFullscreen(boolean enabled) {
                   if (enabled) {
-                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                           WindowInsetsController controller = getWindow().getInsetsController();
                           if (controller != null) {
@@ -504,8 +562,7 @@ jobs:
           }
           EOF
 
-          # 8. Android manifest. `exported=true` is required for Android 12+
-          # when an activity has an intent filter.
+          # 8. Manifest
           cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -535,8 +592,7 @@ jobs:
           </manifest>
           EOF
 
-          # 9. App icon. A tiny valid fallback keeps the build deterministic if
-          # the remote icon host is temporarily unavailable.
+          # 9. App icon fallback
           if ! curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
             "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" \
             --output android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png; then
@@ -544,41 +600,31 @@ jobs:
               | base64 --decode > android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png
           fi
 
-          # 10. Gradle 8.6 wrapper metadata
-          cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.6'
           cache-provider: basic
 
-      - name: Build unsigned release APK
+      - name: Build unsigned Release APK
         working-directory: android-project
         shell: bash
         run: |
           set -euo pipefail
           gradle --no-daemon clean :app:assembleRelease --stacktrace
 
-          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
-          if [ ! -f "$UNSIGNED_APK" ]; then
-            UNSIGNED_APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
+      - name: Locate built unsigned APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNSIGNED_APK="$(find android-project/app/build/outputs/apk/release -type f -name '*.apk' | head -n 1)"
+          if [ -z "$UNSIGNED_APK" ] || [ ! -f "$UNSIGNED_APK" ]; then
+            echo "::error::Could not find generated APK in android-project/app/build/outputs/apk/release"
+            exit 1
           fi
+          echo "UNSIGNED_APK=$UNSIGNED_APK" >> "$GITHUB_ENV"
+          mkdir -p dist
 
-          test -n "${UNSIGNED_APK:-}"
-          test -s "$UNSIGNED_APK"
-          cp "$UNSIGNED_APK" "$RUNNER_TEMP/EdAll-unsigned.apk"
-          echo "UNSIGNED_APK=$RUNNER_TEMP/EdAll-unsigned.apk" >> "$GITHUB_ENV"
-
-      # When EDALL_* secrets are present, the same release key is used for every
-      # build. Otherwise a temporary key is made so that a first-install APK can
-      # still be produced.
       - name: Load or create signing key
         shell: bash
         env:
@@ -588,18 +634,18 @@ jobs:
           EDALL_KEY_PASSWORD: ${{ secrets.EDALL_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          KEYSTORE_PATH="$RUNNER_TEMP/edall-release.keystore"
+          KEYSTORE_DIR="${RUNNER_TEMP}/edall-keystore"
+          mkdir -p "$KEYSTORE_DIR"
+          KEYSTORE_PATH="$KEYSTORE_DIR/edall-release.jks"
 
           if [ -n "${EDALL_KEYSTORE_BASE64:-}" ]; then
-            : "${EDALL_KEYSTORE_PASSWORD:?Set EDALL_KEYSTORE_PASSWORD}"
-            : "${EDALL_KEY_ALIAS:?Set EDALL_KEY_ALIAS}"
-            : "${EDALL_KEY_PASSWORD:?Set EDALL_KEY_PASSWORD}"
-            printf '%s' "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
-            KEYSTORE_PASSWORD="$EDALL_KEYSTORE_PASSWORD"
-            KEY_ALIAS="$EDALL_KEY_ALIAS"
-            KEY_PASSWORD="$EDALL_KEY_PASSWORD"
+            echo "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$EDALL_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$EDALL_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$EDALL_KEY_PASSWORD" >> "$GITHUB_ENV"
           else
-            echo '::warning::No EDALL signing secrets were found. A temporary key will be used. Uninstall any older EdAll APK before installing this build; configure the secrets for future app updates.'
+            echo '::warning::No EDALL signing secrets found. Generating temporary release key...'
             KEYSTORE_PASSWORD="$(openssl rand -hex 24)"
             KEY_ALIAS='edall'
             KEY_PASSWORD="$KEYSTORE_PASSWORD"
@@ -612,17 +658,12 @@ jobs:
               -keysize 2048 \
               -validity 10000 \
               -dname 'CN=EdAll, OU=App, O=EdAll, L=Cairo, ST=Cairo, C=EG'
-          fi
 
-          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null
-          echo "::add-mask::$KEYSTORE_PASSWORD"
-          echo "::add-mask::$KEY_PASSWORD"
-          {
-            echo "EDALL_KEYSTORE_PATH=$KEYSTORE_PATH"
-            echo "EDALL_SIGNING_STORE_PASSWORD=$KEYSTORE_PASSWORD"
-            echo "EDALL_SIGNING_KEY_ALIAS=$KEY_ALIAS"
-            echo "EDALL_SIGNING_KEY_PASSWORD=$KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
+            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+          fi
 
       - name: Align, sign, and verify release APK
         shell: bash
@@ -631,49 +672,30 @@ jobs:
           BUILD_TOOLS_DIR="$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
           ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
           APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
-          ALIGNED_APK="$RUNNER_TEMP/EdAll-aligned.apk"
-          SIGNED_APK="$RUNNER_TEMP/EdAll.apk"
 
-          test -x "$ZIPALIGN"
-          test -x "$APKSIGNER"
-          test -s "$UNSIGNED_APK"
+          ALIGNED_APK="${RUNNER_TEMP}/aligned.apk"
+          FINAL_APK='dist/EdAll.apk'
 
-          # Alignment must happen before apksigner, or it invalidates the APK
-          # signing block. apksigner creates the V1, V2, and V3 signatures.
-          "$ZIPALIGN" -f -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+          "$ZIPALIGN" -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
+
           "$APKSIGNER" sign \
-            --ks "$EDALL_KEYSTORE_PATH" \
-            --ks-key-alias "$EDALL_SIGNING_KEY_ALIAS" \
-            --ks-pass env:EDALL_SIGNING_STORE_PASSWORD \
-            --key-pass env:EDALL_SIGNING_KEY_PASSWORD \
-            --min-sdk-version 24 \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --v4-signing-enabled false \
-            --out "$SIGNED_APK" \
+            --ks "$KEYSTORE_PATH" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --out "$FINAL_APK" \
             "$ALIGNED_APK"
 
-          "$APKSIGNER" verify --verbose --print-certs --min-sdk-version 24 "$SIGNED_APK"
-          test -s "$SIGNED_APK"
+          "$APKSIGNER" verify --verbose "$FINAL_APK"
+          echo "Signed release APK created at $FINAL_APK"
 
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$SIGNED_APK" "$GITHUB_WORKSPACE/dist/EdAll.apk"
-
-      - name: Upload signed APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: EdAll-Android-APK
-          path: dist/EdAll.apk
-          if-no-files-found: error
-
-      - name: Publish APK to GitHub Releases
-        if: success()
+      - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: Education
+          tag_name: ${{ env.RELEASE_TAG }}
           name: EdAll Education Release
-          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
           files: dist/EdAll.apk
-          fail_on_unmatched_files: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
