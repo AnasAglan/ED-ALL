@@ -109,7 +109,7 @@ jobs:
                   minSdk 24
                   targetSdk 34
                   versionCode 100000 + ciBuildNumber
-                  versionName "3.0.${ciBuildNumber}"
+                  versionName "3.1.${ciBuildNumber}"
                   testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
               }
 
@@ -128,7 +128,17 @@ jobs:
 
               packaging {
                   resources {
-                      excludes += ['/META-INF/{AL2.0,LGPL2.1}', 'META-INF/DEPENDENCIES', 'META-INF/INDEX.LIST']
+                      excludes += [
+                          'META-INF/DEPENDENCIES',
+                          'META-INF/LICENSE',
+                          'META-INF/LICENSE.txt',
+                          'META-INF/license.txt',
+                          'META-INF/NOTICE',
+                          'META-INF/NOTICE.txt',
+                          'META-INF/notice.txt',
+                          'META-INF/INDEX.LIST',
+                          'META-INF/*.kotlin_module'
+                      ]
                   }
               }
 
@@ -146,7 +156,7 @@ jobs:
           }
           EOF
 
-          # 5. OkHttp downloader for NewPipe
+          # 5. OkHttp downloader with correct POST handling and cookie store
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
           package com.edall.app;
 
@@ -156,12 +166,16 @@ jobs:
           import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
 
           import java.io.IOException;
+          import java.util.ArrayList;
           import java.util.HashMap;
           import java.util.List;
           import java.util.Map;
           import java.util.concurrent.TimeUnit;
 
+          import okhttp3.Cookie;
+          import okhttp3.CookieJar;
           import okhttp3.Headers;
+          import okhttp3.HttpUrl;
           import okhttp3.OkHttpClient;
           import okhttp3.RequestBody;
           import okhttp3.ResponseBody;
@@ -169,10 +183,22 @@ jobs:
           public class OkHttpDownloader extends Downloader {
               private final OkHttpClient client;
 
-              public OkHttpDownloader(OkHttpClient client) {
-                  this.client = client.newBuilder()
-                          .connectTimeout(20, TimeUnit.SECONDS)
-                          .readTimeout(25, TimeUnit.SECONDS)
+              public OkHttpDownloader(OkHttpClient.Builder builder) {
+                  final Map<String, List<Cookie>> cookieStore = new HashMap<>();
+                  this.client = builder
+                          .cookieJar(new CookieJar() {
+                              @Override
+                              public void saveFromResponse(HttpUrl url, List<Cookie> cookies) {
+                                  cookieStore.put(url.host(), cookies);
+                              }
+                              @Override
+                              public List<Cookie> loadForRequest(HttpUrl url) {
+                                  List<Cookie> cookies = cookieStore.get(url.host());
+                                  return cookies != null ? cookies : new ArrayList<Cookie>();
+                              }
+                          })
+                          .connectTimeout(25, TimeUnit.SECONDS)
+                          .readTimeout(30, TimeUnit.SECONDS)
                           .build();
               }
 
@@ -185,12 +211,14 @@ jobs:
                   RequestBody requestBody = null;
                   if (dataToSend != null) {
                       requestBody = RequestBody.create(dataToSend, null);
+                  } else if ("POST".equalsIgnoreCase(method) || "PUT".equalsIgnoreCase(method) || "PATCH".equalsIgnoreCase(method)) {
+                      requestBody = RequestBody.create(new byte[0], null);
                   }
 
                   okhttp3.Request.Builder builder = new okhttp3.Request.Builder()
                           .method(method, requestBody)
                           .url(url)
-                          .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+                          .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36");
 
                   for (Map.Entry<String, List<String>> pair : request.headers().entrySet()) {
                       builder.removeHeader(pair.getKey());
@@ -221,7 +249,7 @@ jobs:
           }
           EOF
 
-          # 6. Web app interface with improved stream selection (prefer muxed to prevent 2-sec stop)
+          # 6. WebAppInterface with safe stream extraction and fallback flag
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/WebAppInterface.java
           package com.edall.app;
 
@@ -260,27 +288,34 @@ jobs:
               @JavascriptInterface
               public String extractFormats(String videoId) {
                   try {
-                      String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
+                      if (videoId == null || videoId.trim().isEmpty()) {
+                          return "{\"error\":\"Invalid video ID\",\"fallback\":true}";
+                      }
+                      String watchUrl = "https://www.youtube.com/watch?v=" + videoId.trim();
                       StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
 
                       Map<Integer, VideoStream> bestByHeight = new HashMap<>();
 
-                      // Prioritize streams with audio (muxed) to prevent audio-video desync / pauses
+                      // 1. Prioritize muxed streams (audio + video together)
                       for (VideoStream vs : info.getVideoStreams()) {
                           int h = vs.getHeight();
-                          if (h <= 0) continue;
+                          if (h <= 0 || vs.getContent() == null || vs.getContent().isEmpty()) continue;
                           if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
                               bestByHeight.put(h, vs);
                           }
                       }
 
-                      // If a quality has no muxed stream, add video-only stream
+                      // 2. Add video-only streams if no muxed stream exists
                       for (VideoStream vs : info.getVideoOnlyStreams()) {
                           int h = vs.getHeight();
-                          if (h <= 0) continue;
+                          if (h <= 0 || vs.getContent() == null || vs.getContent().isEmpty()) continue;
                           if (!bestByHeight.containsKey(h)) {
                               bestByHeight.put(h, vs);
                           }
+                      }
+
+                      if (bestByHeight.isEmpty()) {
+                          return "{\"error\":\"No streams found\",\"fallback\":true}";
                       }
 
                       List<VideoStream> sortedVideos = new ArrayList<>(bestByHeight.values());
@@ -288,6 +323,7 @@ jobs:
 
                       AudioStream bestAudio = null;
                       for (AudioStream as : info.getAudioStreams()) {
+                          if (as.getContent() == null || as.getContent().isEmpty()) continue;
                           if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
                               bestAudio = as;
                           }
@@ -315,20 +351,20 @@ jobs:
 
                       return root.toString();
                   } catch (Exception e) {
-                      e.printStackTrace();
                       try {
                           JSONObject err = new JSONObject();
                           err.put("error", e.getMessage() != null ? e.getMessage() : "Extraction failed");
+                          err.put("fallback", true);
                           return err.toString();
                       } catch (Exception ignored) {
-                          return "{\"error\":\"Extraction failed\"}";
+                          return "{\"error\":\"Extraction failed\",\"fallback\":true}";
                       }
                   }
               }
           }
           EOF
 
-          # 7. Main activity with cache clearing & live sync
+          # 7. MainActivity with fail-safe video wrapper and instant sync
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
           package com.edall.app;
 
@@ -352,6 +388,8 @@ jobs:
           import androidx.appcompat.app.AppCompatActivity;
 
           import org.schabi.newpipe.extractor.NewPipe;
+          import org.schabi.newpipe.extractor.localization.ContentCountry;
+          import org.schabi.newpipe.extractor.localization.Localization;
           import okhttp3.OkHttpClient;
 
           public class MainActivity extends AppCompatActivity {
@@ -360,37 +398,124 @@ jobs:
 
               private static final String JS_BRIDGE_SHIM =
                   "(function() {" +
-                  "  if (window._edallDesktopInjected) return;" +
-                  "  window._edallDesktopInjected = true;" +
+                  "  if (window._edallAndroidInit) return;" +
+                  "  window._edallAndroidInit = true;" +
                   "  window.edallAndroid = {" +
                   "    isApp: function() { return true; }," +
                   "    isAndroid: function() { return true; }" +
                   "  };" +
+                  "  function hideHero() {" +
+                  "    var h = document.getElementById('desktopDownloadHero');" +
+                  "    if (h) h.style.display = 'none';" +
+                  "  }" +
+                  "  hideHero();" +
+                  "  document.addEventListener('DOMContentLoaded', hideHero);" +
+                  "  window._edOpenFallback = function(container, vid, btn, num, hideLbl, showLbl) {" +
+                  "    if (!container) return;" +
+                  "    try { if (container._desktopCleanup) { container._desktopCleanup(); container._desktopCleanup = null; } } catch(e){}" +
+                  "    var cls = 'edv-' + Math.random().toString(36).slice(2, 9);" +
+                  "    var wrap = document.createElement('div');" +
+                  "    wrap.className = 'edv-wrap ' + cls;" +
+                  "    wrap.style.cssText = 'position:relative;border-radius:var(--radius);overflow:hidden;background:#000;';" +
+                  "    var host = document.createElement('div');" +
+                  "    host.className = 'plyr__video-embed';" +
+                  "    host.setAttribute('data-plyr-provider', 'youtube');" +
+                  "    host.setAttribute('data-plyr-embed-id', vid);" +
+                  "    wrap.appendChild(host);" +
+                  "    container.innerHTML = '';" +
+                  "    container.appendChild(wrap);" +
+                  "    container.style.display = 'block';" +
+                  "    var ytVars = { noCookie: true, rel: 0, showinfo: 0, iv_load_policy: 3, modestbranding: 1, controls: 0, disablekb: 1, playsinline: 1, fs: 0 };" +
+                  "    try {" +
+                  "      container._p = new Plyr(host, {" +
+                  "        controls: ['play-large','rewind','play','fast-forward','progress','current-time','mute','volume','captions','settings','pip','fullscreen']," +
+                  "        settings: ['captions','speed']," +
+                  "        speed: { selected: 1, options: [0.5,0.75,1,1.25,1.5,1.75,2] }," +
+                  "        seekTime: 10, invertTime: false, clickToPlay: true, hideControls: true," +
+                  "        keyboard: { focused: true, global: false }, tooltips: { controls: true, seek: true }," +
+                  "        fullscreen: { enabled: true, fallback: true, iosNative: false, container: '.' + cls }," +
+                  "        youtube: ytVars" +
+                  "      });" +
+                  "      if (typeof _edAddQualityMenu === 'function') { _edAddQualityMenu(container._p, wrap, vid); }" +
+                  "      if (typeof getWatermarkText === 'function') {" +
+                  "        var mark = getWatermarkText();" +
+                  "        if (mark && typeof buildWatermarkLayer === 'function') {" +
+                  "          wrap.appendChild(buildWatermarkLayer(mark));" +
+                  "          if (typeof guardWatermark === 'function') guardWatermark(wrap, mark);" +
+                  "        }" +
+                  "      }" +
+                  "      btn.innerHTML = '<i class=\"fas fa-eye-slash\"></i> ' + hideLbl + ' (' + num + ')';" +
+                  "    } catch(err) {" +
+                  "      if (typeof _edClose === 'function') _edClose(container);" +
+                  "      btn.innerHTML = '<i class=\"fas fa-play-circle\"></i> ' + showLbl + ' (' + num + ')';" +
+                  "    }" +
+                  "  };" +
                   "  window.edallDesktop = {" +
                   "    isDesktop: true," +
                   "    isAndroid: true," +
-                  "    version: '3.0.0'," +
+                  "    version: '3.1.0'," +
                   "    getYoutubeFormats: function(vid, force) {" +
                   "      return new Promise(function(resolve, reject) {" +
                   "        setTimeout(function() {" +
                   "          try {" +
+                  "            if (!window.edallNative || typeof window.edallNative.extractFormats !== 'function') {" +
+                  "              reject(new Error('Native extractor unavailable')); return;" +
+                  "            }" +
                   "            var res = window.edallNative.extractFormats(vid);" +
                   "            if (!res) { reject(new Error('No response from native extractor')); return; }" +
                   "            var data = JSON.parse(res);" +
-                  "            if (data.error) { reject(new Error(data.error)); return; }" +
-                  "            if (data.videos && data.videos.length > 0) { resolve(data); }" +
-                  "            else { reject(new Error('No playable video streams')); }" +
+                  "            if (data.error || !data.videos || data.videos.length === 0) {" +
+                  "              reject(new Error(data.error || 'No playable streams')); return;" +
+                  "            }" +
+                  "            resolve(data);" +
                   "          } catch(err) { reject(err); }" +
                   "        }, 10);" +
                   "      });" +
                   "    }," +
                   "    setVideoFullscreen: function(enabled) {" +
-                  "      try { window.edallNative.setFullscreen(enabled === true); return Promise.resolve(true); }" +
+                  "      try { if (window.edallNative && typeof window.edallNative.setFullscreen === 'function') { window.edallNative.setFullscreen(enabled === true); } return Promise.resolve(true); }" +
                   "      catch(e) { return Promise.resolve(false); }" +
                   "    }" +
                   "  };" +
-                  "  var hero = document.getElementById('desktopDownloadHero');" +
-                  "  if (hero) hero.style.display = 'none';" +
+                  "  var hookEdOpen = function() {" +
+                  "    if (typeof window._edOpen === 'function' && !window._edOpenHooked) {" +
+                  "      window._edOpenHooked = true;" +
+                  "      var rawEdOpen = window._edOpen;" +
+                  "      window._edOpen = async function(btn, containerId, num) {" +
+                  "        var container = document.getElementById(containerId);" +
+                  "        if (!container) return rawEdOpen(btn, containerId, num);" +
+                  "        var showLbl = container.getAttribute('data-show-label') || 'Watch';" +
+                  "        var hideLbl = container.getAttribute('data-hide-label') || 'Hide';" +
+                  "        if (container.style.display !== 'none' && container.style.display) {" +
+                  "          return rawEdOpen(btn, containerId, num);" +
+                  "        }" +
+                  "        var vid = null;" +
+                  "        try { if (typeof _edUnpack === 'function' && btn.dataset) { vid = _edUnpack(btn.dataset.k1, btn.dataset.k2, btn.dataset.k3); } } catch(e){}" +
+                  "        btn.disabled = true;" +
+                  "        btn.innerHTML = '<i class=\"fas fa-spinner fa-spin\"></i> ' + showLbl + ' (' + num + ')';" +
+                  "        try {" +
+                  "          if (typeof _edLoadLib === 'function') await _edLoadLib();" +
+                  "          if (typeof _edDesktopOpen === 'function' && vid) {" +
+                  "            await _edDesktopOpen(container, vid);" +
+                  "            btn.innerHTML = '<i class=\"fas fa-eye-slash\"></i> ' + hideLbl + ' (' + num + ')';" +
+                  "            btn.disabled = false;" +
+                  "            return;" +
+                  "          }" +
+                  "        } catch(openErr) {" +
+                  "          console.warn('[EdAll] Native extractor failed; switching to embedded player:', openErr);" +
+                  "          if (vid && container) {" +
+                  "            window._edOpenFallback(container, vid, btn, num, hideLbl, showLbl);" +
+                  "            btn.disabled = false;" +
+                  "            return;" +
+                  "          }" +
+                  "        }" +
+                  "        btn.disabled = false;" +
+                  "        return rawEdOpen(btn, containerId, num);" +
+                  "      };" +
+                  "    }" +
+                  "  };" +
+                  "  hookEdOpen();" +
+                  "  setInterval(hookEdOpen, 1000);" +
                   "})();";
 
               @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
@@ -401,14 +526,13 @@ jobs:
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
                   try {
-                      NewPipe.init(new OkHttpDownloader(new OkHttpClient()));
+                      NewPipe.init(new OkHttpDownloader(new OkHttpClient.Builder()), Localization.DEFAULT, ContentCountry.DEFAULT);
                   } catch (Exception ignored) {
                   }
 
                   webView = new WebView(this);
                   setContentView(webView);
 
-                  // Clear disk and memory cache to ensure immediate updates from server
                   webView.clearCache(true);
 
                   WebSettings ws = webView.getSettings();
@@ -419,7 +543,7 @@ jobs:
                   ws.setAllowFileAccess(true);
                   ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
                   ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/3.0 EdAllDesktop/2.0");
+                  ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/3.1");
 
                   webView.addJavascriptInterface(new WebAppInterface(this), "edallNative");
 
@@ -468,7 +592,6 @@ jobs:
                       }
                   });
 
-                  // Load with live_sync timestamp just like the desktop app
                   String liveUrl = PLATFORM_URL + "?live_sync=" + System.currentTimeMillis();
                   webView.loadUrl(liveUrl);
               }
@@ -515,7 +638,7 @@ jobs:
           }
           EOF
 
-          # 8. Android manifest
+          # 8. AndroidManifest.xml
           cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -545,7 +668,7 @@ jobs:
           </manifest>
           EOF
 
-          # 9. App icon fallback
+          # 9. Launcher icon
           if ! curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
             "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" \
             --output android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png; then
@@ -553,7 +676,7 @@ jobs:
               | base64 --decode > android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png
           fi
 
-          # 10. Gradle 8.6 wrapper metadata
+          # 10. Gradle wrapper properties
           cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
@@ -585,7 +708,6 @@ jobs:
           cp "$UNSIGNED_APK" "$RUNNER_TEMP/EdAll-unsigned.apk"
           echo "UNSIGNED_APK=$RUNNER_TEMP/EdAll-unsigned.apk" >> "$GITHUB_ENV"
 
-      # Persistent fixed keystore (re-used across all builds so signatures match and updates install smoothly)
       - name: Load or create fixed signing key
         shell: bash
         env:
