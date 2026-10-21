@@ -3,40 +3,34 @@ name: Build EdAll Android App (APK)
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     paths:
       - '.github/workflows/build-android.yml'
-
-concurrency:
-  group: build-android-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: write
 
+concurrency:
+  group: edall-android-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   ANDROID_API_LEVEL: '34'
   ANDROID_BUILD_TOOLS: '34.0.0'
-  JAVA_VERSION: '17'
-  RELEASE_TAG: 'v3.0.0-android'
 
 jobs:
-  build:
-    name: Build & Release Android APK
+  build-apk:
+    name: Build Integrated Android App (Release APK)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          java-version: '17'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -47,21 +41,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses || true
           sdkmanager --install \
             "platforms;android-${ANDROID_API_LEVEL}" \
             "build-tools;${ANDROID_BUILD_TOOLS}"
 
-      - name: Scaffold Android project structure
+      - name: Scaffold complete Android project
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p android-project/app/src/main/java/com/edall/app
           mkdir -p android-project/app/src/main/res/values
+          mkdir -p android-project/app/src/main/res/drawable
           mkdir -p android-project/app/src/main/res/mipmap-hdpi
           mkdir -p android-project/gradle/wrapper
 
-          # 1. settings.gradle
+          # 1. Gradle properties
+          cat << 'EOF' > android-project/gradle.properties
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          android.nonTransitiveRClass=true
+          EOF
+
+          # 2. Gradle settings
           cat << 'EOF' > android-project/settings.gradle
           pluginManagement {
               repositories {
@@ -82,25 +85,20 @@ jobs:
           include ':app'
           EOF
 
-          # 2. Root build.gradle
+          # 3. Root Gradle build file
           cat << 'EOF' > android-project/build.gradle
           plugins {
               id 'com.android.application' version '8.2.2' apply false
           }
           EOF
 
-          # 3. gradle.properties
-          cat << 'EOF' > android-project/gradle.properties
-          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-
-          # 4. app/build.gradle
+          # 4. App Gradle build file
           cat << 'EOF' > android-project/app/build.gradle
           plugins {
               id 'com.android.application'
           }
+
+          def ciBuildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
 
           android {
               namespace 'com.edall.app'
@@ -110,8 +108,9 @@ jobs:
                   applicationId "com.edall.app"
                   minSdk 24
                   targetSdk 34
-                  versionCode 100000 + Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER") ?: "1")
-                  versionName "3.0.0"
+                  versionCode 100000 + ciBuildNumber
+                  versionName "3.0.${ciBuildNumber}"
+                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
               }
 
               buildTypes {
@@ -147,57 +146,33 @@ jobs:
           }
           EOF
 
-          # 5. OkHttp Downloader with Cookie Support & POST Body Fix
+          # 5. OkHttp downloader for NewPipe
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/OkHttpDownloader.java
           package com.edall.app;
 
-          import androidx.annotation.NonNull;
           import org.schabi.newpipe.extractor.downloader.Downloader;
           import org.schabi.newpipe.extractor.downloader.Request;
           import org.schabi.newpipe.extractor.downloader.Response;
           import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
 
           import java.io.IOException;
-          import java.util.Collections;
           import java.util.HashMap;
           import java.util.List;
           import java.util.Map;
-          import java.util.concurrent.ConcurrentHashMap;
           import java.util.concurrent.TimeUnit;
 
-          import okhttp3.Cookie;
-          import okhttp3.CookieJar;
           import okhttp3.Headers;
-          import okhttp3.HttpUrl;
           import okhttp3.OkHttpClient;
           import okhttp3.RequestBody;
           import okhttp3.ResponseBody;
 
           public class OkHttpDownloader extends Downloader {
-              private static final String DEFAULT_USER_AGENT =
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-
               private final OkHttpClient client;
-              private final Map<String, List<Cookie>> cookieStore = new ConcurrentHashMap<>();
 
-              public OkHttpDownloader() {
-                  this.client = new OkHttpClient.Builder()
-                          .cookieJar(new CookieJar() {
-                              @Override
-                              public void saveFromResponse(@NonNull HttpUrl url, @NonNull List<Cookie> cookies) {
-                                  cookieStore.put(url.host(), cookies);
-                              }
-                              @NonNull
-                              @Override
-                              public List<Cookie> loadForRequest(@NonNull HttpUrl url) {
-                                  List<Cookie> cookies = cookieStore.get(url.host());
-                                  return cookies != null ? cookies : Collections.emptyList();
-                              }
-                          })
-                          .connectTimeout(25, TimeUnit.SECONDS)
-                          .readTimeout(30, TimeUnit.SECONDS)
-                          .followRedirects(true)
-                          .followSslRedirects(true)
+              public OkHttpDownloader(OkHttpClient client) {
+                  this.client = client.newBuilder()
+                          .connectTimeout(20, TimeUnit.SECONDS)
+                          .readTimeout(25, TimeUnit.SECONDS)
                           .build();
               }
 
@@ -208,17 +183,14 @@ jobs:
                   byte[] dataToSend = request.dataToSend();
 
                   RequestBody requestBody = null;
-                  if ("POST".equalsIgnoreCase(method)) {
-                      requestBody = RequestBody.create(dataToSend != null ? dataToSend : new byte[0], null);
-                  } else if (dataToSend != null) {
+                  if (dataToSend != null) {
                       requestBody = RequestBody.create(dataToSend, null);
                   }
 
                   okhttp3.Request.Builder builder = new okhttp3.Request.Builder()
                           .method(method, requestBody)
                           .url(url)
-                          .addHeader("User-Agent", DEFAULT_USER_AGENT)
-                          .addHeader("Accept-Language", "en-US,en;q=0.9");
+                          .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
                   for (Map.Entry<String, List<String>> pair : request.headers().entrySet()) {
                       builder.removeHeader(pair.getKey());
@@ -249,15 +221,14 @@ jobs:
           }
           EOF
 
-          # 6. WebAppInterface
+          # 6. Web app interface with improved stream selection (prefer muxed to prevent 2-sec stop)
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/WebAppInterface.java
           package com.edall.app;
 
           import android.webkit.JavascriptInterface;
           import org.json.JSONArray;
           import org.json.JSONObject;
-          import org.schabi.newpipe.extractor.NewPipe;
-          import org.schabi.newpipe.extractor.StreamingService;
+          import org.schabi.newpipe.extractor.ServiceList;
           import org.schabi.newpipe.extractor.stream.AudioStream;
           import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
@@ -290,30 +261,25 @@ jobs:
               public String extractFormats(String videoId) {
                   try {
                       String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
-                      StreamingService service = NewPipe.getServiceByUrl(watchUrl);
-                      StreamInfo info = StreamInfo.getInfo(service, watchUrl);
+                      StreamInfo info = StreamInfo.getInfo(ServiceList.YouTube, watchUrl);
 
                       Map<Integer, VideoStream> bestByHeight = new HashMap<>();
 
-                      if (info.getVideoStreams() != null) {
-                          for (VideoStream vs : info.getVideoStreams()) {
-                              int h = vs.getHeight();
-                              String url = vs.getContent();
-                              if (h <= 0 || url == null || !url.startsWith("http")) continue;
-                              if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
-                                  bestByHeight.put(h, vs);
-                              }
+                      // Prioritize streams with audio (muxed) to prevent audio-video desync / pauses
+                      for (VideoStream vs : info.getVideoStreams()) {
+                          int h = vs.getHeight();
+                          if (h <= 0) continue;
+                          if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
+                              bestByHeight.put(h, vs);
                           }
                       }
 
-                      if (info.getVideoOnlyStreams() != null) {
-                          for (VideoStream vs : info.getVideoOnlyStreams()) {
-                              int h = vs.getHeight();
-                              String url = vs.getContent();
-                              if (h <= 0 || url == null || !url.startsWith("http")) continue;
-                              if (!bestByHeight.containsKey(h) || (vs.getBitrate() > bestByHeight.get(h).getBitrate())) {
-                                  bestByHeight.put(h, vs);
-                              }
+                      // If a quality has no muxed stream, add video-only stream
+                      for (VideoStream vs : info.getVideoOnlyStreams()) {
+                          int h = vs.getHeight();
+                          if (h <= 0) continue;
+                          if (!bestByHeight.containsKey(h)) {
+                              bestByHeight.put(h, vs);
                           }
                       }
 
@@ -321,20 +287,10 @@ jobs:
                       Collections.sort(sortedVideos, (a, b) -> Integer.compare(b.getHeight(), a.getHeight()));
 
                       AudioStream bestAudio = null;
-                      if (info.getAudioStreams() != null) {
-                          for (AudioStream as : info.getAudioStreams()) {
-                              String url = as.getContent();
-                              if (url == null || !url.startsWith("http")) continue;
-                              if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
-                                  bestAudio = as;
-                              }
+                      for (AudioStream as : info.getAudioStreams()) {
+                          if (bestAudio == null || as.getAverageBitrate() > bestAudio.getAverageBitrate()) {
+                              bestAudio = as;
                           }
-                      }
-
-                      if (sortedVideos.isEmpty()) {
-                          JSONObject err = new JSONObject();
-                          err.put("error", "No playable streams found for this video");
-                          return err.toString();
                       }
 
                       JSONObject root = new JSONObject();
@@ -362,7 +318,7 @@ jobs:
                       e.printStackTrace();
                       try {
                           JSONObject err = new JSONObject();
-                          err.put("error", e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+                          err.put("error", e.getMessage() != null ? e.getMessage() : "Extraction failed");
                           return err.toString();
                       } catch (Exception ignored) {
                           return "{\"error\":\"Extraction failed\"}";
@@ -372,7 +328,7 @@ jobs:
           }
           EOF
 
-          # 7. MainActivity
+          # 7. Main activity with cache clearing & live sync
           cat << 'EOF' > android-project/app/src/main/java/com/edall/app/MainActivity.java
           package com.edall.app;
 
@@ -396,8 +352,7 @@ jobs:
           import androidx.appcompat.app.AppCompatActivity;
 
           import org.schabi.newpipe.extractor.NewPipe;
-          import org.schabi.newpipe.extractor.localization.ContentCountry;
-          import org.schabi.newpipe.extractor.localization.Localization;
+          import okhttp3.OkHttpClient;
 
           public class MainActivity extends AppCompatActivity {
               private WebView webView;
@@ -446,17 +401,15 @@ jobs:
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
                   try {
-                      NewPipe.init(
-                          new OkHttpDownloader(),
-                          new Localization("en", "US"),
-                          new ContentCountry("US")
-                      );
-                  } catch (Exception e) {
-                      e.printStackTrace();
+                      NewPipe.init(new OkHttpDownloader(new OkHttpClient()));
+                  } catch (Exception ignored) {
                   }
 
                   webView = new WebView(this);
                   setContentView(webView);
+
+                  // Clear disk and memory cache to ensure immediate updates from server
+                  webView.clearCache(true);
 
                   WebSettings ws = webView.getSettings();
                   ws.setJavaScriptEnabled(true);
@@ -464,6 +417,7 @@ jobs:
                   ws.setDatabaseEnabled(true);
                   ws.setMediaPlaybackRequiresUserGesture(false);
                   ws.setAllowFileAccess(true);
+                  ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
                   ws.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
                   ws.setUserAgentString(ws.getUserAgentString() + " EdAllAndroid/3.0 EdAllDesktop/2.0");
 
@@ -504,33 +458,32 @@ jobs:
                   getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
                       @Override
                       public void handleOnBackPressed() {
-                          if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE) {
+                          if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE) {
                               setDesktopFullscreen(false);
-                          } else if (webView != null && webView.canGoBack()) {
+                          } else if (webView.canGoBack()) {
                               webView.goBack();
                           } else {
-                              setEnabled(false);
-                              getOnBackPressedDispatcher().onBackPressed();
+                              finish();
                           }
                       }
                   });
 
-                  if (savedInstanceState == null) {
-                      webView.loadUrl(PLATFORM_URL);
-                  } else {
-                      webView.restoreState(savedInstanceState);
-                  }
+                  // Load with live_sync timestamp just like the desktop app
+                  String liveUrl = PLATFORM_URL + "?live_sync=" + System.currentTimeMillis();
+                  webView.loadUrl(liveUrl);
               }
 
               @Override
-              protected void onSaveInstanceState(Bundle outState) {
-                  super.onSaveInstanceState(outState);
-                  if (webView != null) webView.saveState(outState);
+              protected void onResume() {
+                  super.onResume();
+                  if (webView != null) {
+                      webView.clearCache(true);
+                  }
               }
 
               public void setDesktopFullscreen(boolean enabled) {
                   if (enabled) {
-                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                           WindowInsetsController controller = getWindow().getInsetsController();
                           if (controller != null) {
@@ -562,13 +515,13 @@ jobs:
           }
           EOF
 
-          # 8. Manifest
+          # 8. Android manifest
           cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
               <application
                   android:allowBackup="true"
@@ -583,8 +536,8 @@ jobs:
                       android:exported="true"
                       android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
               </application>
@@ -600,32 +553,40 @@ jobs:
               | base64 --decode > android-project/app/src/main/res/mipmap-hdpi/ic_launcher.png
           fi
 
+          # 10. Gradle 8.6 wrapper metadata
+          cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.6'
           cache-provider: basic
 
-      - name: Build unsigned Release APK
+      - name: Build unsigned release APK
         working-directory: android-project
         shell: bash
         run: |
           set -euo pipefail
           gradle --no-daemon clean :app:assembleRelease --stacktrace
 
-      - name: Locate built unsigned APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          UNSIGNED_APK="$(find android-project/app/build/outputs/apk/release -type f -name '*.apk' | head -n 1)"
-          if [ -z "$UNSIGNED_APK" ] || [ ! -f "$UNSIGNED_APK" ]; then
-            echo "::error::Could not find generated APK in android-project/app/build/outputs/apk/release"
-            exit 1
+          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          if [ ! -f "$UNSIGNED_APK" ]; then
+            UNSIGNED_APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*-unsigned.apk' -print -quit)"
           fi
-          echo "UNSIGNED_APK=$UNSIGNED_APK" >> "$GITHUB_ENV"
-          mkdir -p dist
 
-      - name: Load or create signing key
+          test -n "${UNSIGNED_APK:-}"
+          test -s "$UNSIGNED_APK"
+          cp "$UNSIGNED_APK" "$RUNNER_TEMP/EdAll-unsigned.apk"
+          echo "UNSIGNED_APK=$RUNNER_TEMP/EdAll-unsigned.apk" >> "$GITHUB_ENV"
+
+      # Persistent fixed keystore (re-used across all builds so signatures match and updates install smoothly)
+      - name: Load or create fixed signing key
         shell: bash
         env:
           EDALL_KEYSTORE_BASE64: ${{ secrets.EDALL_KEYSTORE_BASE64 }}
@@ -634,36 +595,32 @@ jobs:
           EDALL_KEY_PASSWORD: ${{ secrets.EDALL_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          KEYSTORE_DIR="${RUNNER_TEMP}/edall-keystore"
-          mkdir -p "$KEYSTORE_DIR"
-          KEYSTORE_PATH="$KEYSTORE_DIR/edall-release.jks"
+          KEYSTORE_PATH="$RUNNER_TEMP/edall-release.keystore"
 
           if [ -n "${EDALL_KEYSTORE_BASE64:-}" ]; then
-            echo "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
-            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
-            echo "KEYSTORE_PASSWORD=$EDALL_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=$EDALL_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=$EDALL_KEY_PASSWORD" >> "$GITHUB_ENV"
+            printf '%s' "$EDALL_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            KEYSTORE_PASSWORD="${EDALL_KEYSTORE_PASSWORD:-edall_secure_key_2026}"
+            KEY_ALIAS="${EDALL_KEY_ALIAS:-edall}"
+            KEY_PASSWORD="${EDALL_KEY_PASSWORD:-edall_secure_key_2026}"
           else
-            echo '::warning::No EDALL signing secrets found. Generating temporary release key...'
-            KEYSTORE_PASSWORD="$(openssl rand -hex 24)"
-            KEY_ALIAS='edall'
-            KEY_PASSWORD="$KEYSTORE_PASSWORD"
-            keytool -genkeypair -v \
-              -keystore "$KEYSTORE_PATH" \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" \
-              -alias "$KEY_ALIAS" \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname 'CN=EdAll, OU=App, O=EdAll, L=Cairo, ST=Cairo, C=EG'
-
-            echo "KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
-            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "Using fixed deterministic EdAll release keystore..."
+            cat << 'KEYSTORE_B64_EOF' | base64 --decode > "$KEYSTORE_PATH"
+          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
+          KEYSTORE_B64_EOF
+            KEYSTORE_PASSWORD="edall_secure_key_2026"
+            KEY_ALIAS="edall"
+            KEY_PASSWORD="edall_secure_key_2026"
           fi
+
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null
+          echo "::add-mask::$KEYSTORE_PASSWORD"
+          echo "::add-mask::$KEY_PASSWORD"
+          {
+            echo "EDALL_KEYSTORE_PATH=$KEYSTORE_PATH"
+            echo "EDALL_SIGNING_STORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "EDALL_SIGNING_KEY_ALIAS=$KEY_ALIAS"
+            echo "EDALL_SIGNING_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
 
       - name: Align, sign, and verify release APK
         shell: bash
@@ -672,39 +629,47 @@ jobs:
           BUILD_TOOLS_DIR="$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}"
           ZIPALIGN="$BUILD_TOOLS_DIR/zipalign"
           APKSIGNER="$BUILD_TOOLS_DIR/apksigner"
+          ALIGNED_APK="$RUNNER_TEMP/EdAll-aligned.apk"
+          SIGNED_APK="$RUNNER_TEMP/EdAll.apk"
 
-          ALIGNED_APK="${RUNNER_TEMP}/aligned.apk"
-          FINAL_APK='dist/EdAll.apk'
+          test -x "$ZIPALIGN"
+          test -x "$APKSIGNER"
+          test -s "$UNSIGNED_APK"
 
-          "$ZIPALIGN" -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
-
+          "$ZIPALIGN" -f -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
           "$APKSIGNER" sign \
-            --ks "$KEYSTORE_PATH" \
-            --ks-pass "pass:$KEYSTORE_PASSWORD" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --key-pass "pass:$KEY_PASSWORD" \
-            --out "$FINAL_APK" \
+            --ks "$EDALL_KEYSTORE_PATH" \
+            --ks-key-alias "$EDALL_SIGNING_KEY_ALIAS" \
+            --ks-pass env:EDALL_SIGNING_STORE_PASSWORD \
+            --key-pass env:EDALL_SIGNING_KEY_PASSWORD \
+            --min-sdk-version 24 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --v4-signing-enabled false \
+            --out "$SIGNED_APK" \
             "$ALIGNED_APK"
 
-          "$APKSIGNER" verify --verbose "$FINAL_APK"
-          echo "Signed release APK created at $FINAL_APK"
+          "$APKSIGNER" verify --verbose --print-certs --min-sdk-version 24 "$SIGNED_APK"
+          test -s "$SIGNED_APK"
 
-      # 1. رفع التطبيق كـ Artifact (متاح للتحميل دائماً ومباشرة من صفحة الـ Action)
-      - name: Upload APK Artifact
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$SIGNED_APK" "$GITHUB_WORKSPACE/dist/EdAll.apk"
+
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: EdAll-Android-APK
           path: dist/EdAll.apk
           if-no-files-found: error
 
-      # 2. النشر إلى GitHub Releases
-      - name: Publish to GitHub Releases
+      - name: Publish APK to GitHub Releases
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: EdAll Android App v3.0
-          draft: false
-          prerelease: false
+          tag_name: Education
+          name: EdAll Education Release
+          target_commitish: ${{ github.sha }}
           files: dist/EdAll.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}
