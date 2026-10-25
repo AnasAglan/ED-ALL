@@ -37,6 +37,11 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Set up Gradle 8.6
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.6'
+
       - name: Scaffold Android Project
         run: |
           set -e
@@ -75,19 +80,13 @@ jobs:
           include ':app'
           EOF
 
-          # build.gradle الرئيسي بدون any allprojects repositories لتفادي خطأ image-14
+          # Pin the Android Gradle Plugin version explicitly.
           cat << 'EOF' > android-project/build.gradle
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.2.2'
-              }
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
           }
 
-          task clean(type: Delete) {
+          tasks.register('clean', Delete) {
               delete rootProject.layout.buildDirectory
           }
           EOF
@@ -134,6 +133,10 @@ jobs:
               implementation 'com.squareup.okhttp3:okhttp:4.12.0'
               implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.26.5'
           }
+          EOF
+
+          cat << 'EOF' > android-project/app/proguard-rules.pro
+          # ED ALL app-specific ProGuard rules.
           EOF
 
           cat << 'EOF' > android-project/app/src/main/res/values/strings.xml
@@ -627,25 +630,14 @@ jobs:
               img.save(f'android-project/app/src/main/res/{folder}/ic_launcher.png')
           "
 
-      - name: Setup Gradle Wrapper
-        run: |
-          cd android-project
-          cat << 'EOF' > gradle/wrapper/gradle-wrapper.properties
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
-          networkTimeout=10000
-          validateDistributionUrl=true
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-          chmod +x gradlew || true
+      - name: Verify Gradle Version
+        run: gradle --version
 
       - name: Build Release APK with Gradle
         run: |
           cd android-project
-          gradle wrapper
-          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          gradle --version
+          gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: Sign & Align Release APK
         env:
