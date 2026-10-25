@@ -1,53 +1,60 @@
-name: Build Android APK (ED ALL)
+name: Build & Sign Release APK (ED ALL)
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '.github/workflows/build-android.yml'
+
+permissions:
+  contents: write
 
 concurrency:
   group: edall-android-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: write
-  packages: write
-
 jobs:
-  build-apk:
+  build:
     name: Build & Sign Release APK
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_API_LEVEL: '34'
+      ANDROID_BUILD_TOOLS: '34.0.0'
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Scaffold Complete Android Project
+      - name: Scaffold Android Project
         run: |
           set -e
-          mkdir -p android-project/app/src/main/java/com/edall/platform
+          mkdir -p android-project/app/src/main/java/app/lovable/edall
           mkdir -p android-project/app/src/main/res/values
-          mkdir -p android-project/app/src/main/res/drawable
+          mkdir -p android-project/app/src/main/res/mipmap-mdpi
+          mkdir -p android-project/app/src/main/res/mipmap-hdpi
+          mkdir -p android-project/app/src/main/res/mipmap-xhdpi
           mkdir -p android-project/app/src/main/res/mipmap-xxhdpi
           mkdir -p android-project/gradle/wrapper
 
           cat << 'EOF' > android-project/gradle.properties
           org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
           android.useAndroidX=true
-          android.enableJetifier=true
           android.nonTransitiveRClass=true
           EOF
 
+          # settings.gradle المركزي يحدد المستودعات بالكامل لمنع أي تعارض
           cat << 'EOF' > android-project/settings.gradle
           pluginManagement {
               repositories {
@@ -64,10 +71,11 @@ jobs:
                   maven { url 'https://jitpack.io' }
               }
           }
-          rootProject.name = "ED ALL"
+          rootProject.name = 'ED ALL'
           include ':app'
           EOF
 
+          # build.gradle الرئيسي بدون any allprojects repositories لتفادي خطأ image-14
           cat << 'EOF' > android-project/build.gradle
           buildscript {
               repositories {
@@ -78,12 +86,9 @@ jobs:
                   classpath 'com.android.tools.build:gradle:8.2.2'
               }
           }
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-                  maven { url 'https://jitpack.io' }
-              }
+
+          task clean(type: Delete) {
+              delete rootProject.layout.buildDirectory
           }
           EOF
 
@@ -92,18 +97,21 @@ jobs:
               id 'com.android.application'
           }
 
+          def ciRunNum = System.getenv("GITHUB_RUN_NUMBER") ?: "1"
+          def ciVersionCode = 100000 + ciRunNum.toInteger()
+
           android {
-              namespace 'com.edall.platform'
+              namespace 'app.lovable.edall'
               compileSdk 34
 
               defaultConfig {
-                  applicationId "com.edall.platform"
+                  applicationId "app.lovable.edall"
                   minSdk 24
                   targetSdk 34
-                  versionCode 100003
-                  versionName "3.1.0"
+                  versionCode ciVersionCode
+                  versionName "3.2.${ciRunNum}"
 
-                  vectorDrawables.useSupportLibrary = true
+                  testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
               }
 
               buildTypes {
@@ -128,8 +136,6 @@ jobs:
           }
           EOF
 
-          touch android-project/app/proguard-rules.pro
-
           cat << 'EOF' > android-project/app/src/main/res/values/strings.xml
           <resources>
               <string name="app_name">ED ALL</string>
@@ -138,38 +144,25 @@ jobs:
 
           cat << 'EOF' > android-project/app/src/main/res/values/colors.xml
           <resources>
-              <color name="primary">#020617</color>
-              <color name="black">#000000</color>
+              <color name="black">#FF000000</color>
+              <color name="white">#FFFFFFFF</color>
+              <color name="primary">#1E293B</color>
           </resources>
           EOF
 
-          cat << 'EOF' > android-project/app/src/main/res/drawable/ic_launcher_foreground.xml
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <path
-                  android:fillColor="#0ea5e9"
-                  android:pathData="M30,30h48v48h-48z"/>
-              <path
-                  android:fillColor="#ffffff"
-                  android:pathData="M38,44h32v6h-32zM38,54h24v6h-24z"/>
-          </vector>
+          cat << 'EOF' > android-project/app/src/main/res/values/styles.xml
+          <resources>
+              <style name="Theme.EDALL" parent="Theme.AppCompat.NoActionBar">
+                  <item name="android:windowBackground">@color/primary</item>
+                  <item name="android:statusBarColor">@color/primary</item>
+                  <item name="android:navigationBarColor">@color/primary</item>
+              </style>
+          </resources>
           EOF
-
-          cat << 'EOF' > android-project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-          iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmhlAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABoSURBVHhe7cEBDQAAAMKg909tDwcUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4Ddt0gABb84yfwAAAABJRU5ErkJggg==
-          EOF
-          base64 -d android-project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png > android-project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png.tmp
-          mv android-project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png.tmp android-project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-
-          curl -sSL "https://edall.lovable.app/__l5e/assets-v1/71bdb918-9fe9-4771-a708-5fa36185f009/edall.png" -o android-project/app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
 
           cat << 'EOF' > android-project/app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -179,12 +172,12 @@ jobs:
                   android:label="@string/app_name"
                   android:roundIcon="@mipmap/ic_launcher"
                   android:supportsRtl="true"
-                  android:theme="@style/Theme.AppCompat.NoActionBar"
-                  android:usesCleartextTraffic="true">
+                  android:usesCleartextTraffic="false"
+                  android:theme="@style/Theme.EDALL">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
-                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
                       android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -195,8 +188,9 @@ jobs:
           </manifest>
           EOF
 
-          cat << 'EOF' > android-project/app/src/main/java/com/edall/platform/OkHttpDownloader.java
-          package com.edall.platform;
+          # OkHttpDownloader للتعامل الآمن مع يوتيوب بدون أخطاء POST
+          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/OkHttpDownloader.java
+          package app.lovable.edall;
 
           import org.schabi.newpipe.extractor.downloader.Downloader;
           import org.schabi.newpipe.extractor.downloader.Request;
@@ -204,51 +198,38 @@ jobs:
           import org.schabi.newpipe.extractor.exceptions.ReCaptchaException;
 
           import java.io.IOException;
-          import java.util.ArrayList;
-          import java.util.Collections;
-          import java.util.HashMap;
-          import java.util.List;
-          import java.util.Map;
-          import java.util.concurrent.ConcurrentHashMap;
+          import java.util.*;
           import java.util.concurrent.TimeUnit;
 
-          import okhttp3.Cookie;
-          import okhttp3.CookieJar;
-          import okhttp3.HttpUrl;
-          import okhttp3.MediaType;
-          import okhttp3.OkHttpClient;
-          import okhttp3.RequestBody;
-          import okhttp3.ResponseBody;
+          import okhttp3.*;
 
           public class OkHttpDownloader extends Downloader {
               private static OkHttpDownloader instance;
               private final OkHttpClient client;
-              private final Map<String, List<Cookie>> cookieStore = new ConcurrentHashMap<>();
 
               private OkHttpDownloader() {
                   this.client = new OkHttpClient.Builder()
-                          .connectTimeout(25, TimeUnit.SECONDS)
-                          .readTimeout(30, TimeUnit.SECONDS)
-                          .cookieJar(new CookieJar() {
-                              @Override
-                              public void saveFromResponse(HttpUrl url, List<Cookie> cookies) {
-                                  cookieStore.put(url.host(), cookies);
-                              }
-                              @Override
-                              public List<Cookie> loadForRequest(HttpUrl url) {
-                                  List<Cookie> cookies = cookieStore.get(url.host());
-                                  return cookies != null ? cookies : Collections.emptyList();
-                              }
-                          })
-                          .followRedirects(true)
-                          .followSslRedirects(true)
-                          .build();
+                      .connectTimeout(25, TimeUnit.SECONDS)
+                      .readTimeout(30, TimeUnit.SECONDS)
+                      .followRedirects(true)
+                      .followSslRedirects(true)
+                      .cookieJar(new CookieJar() {
+                          private final HashMap<String, List<Cookie>> cookieStore = new HashMap<>();
+                          @Override
+                          public void saveFromResponse(HttpUrl url, List<Cookie> cookies) {
+                              cookieStore.put(url.host(), cookies);
+                          }
+                          @Override
+                          public List<Cookie> loadForRequest(HttpUrl url) {
+                              List<Cookie> cookies = cookieStore.get(url.host());
+                              return cookies != null ? cookies : new ArrayList<>();
+                          }
+                      })
+                      .build();
               }
 
               public static synchronized OkHttpDownloader getInstance() {
-                  if (instance == null) {
-                      instance = new OkHttpDownloader();
-                  }
+                  if (instance == null) instance = new OkHttpDownloader();
                   return instance;
               }
 
@@ -256,169 +237,199 @@ jobs:
               public Response execute(Request request) throws IOException, ReCaptchaException {
                   String httpMethod = request.httpMethod();
                   String url = request.url();
-                  byte[] dataToSend = request.dataToSend();
+                  Headers.Builder headersBuilder = new Headers.Builder();
 
-                  RequestBody requestBody = null;
-                  if ("POST".equalsIgnoreCase(httpMethod) || "PUT".equalsIgnoreCase(httpMethod)) {
-                      byte[] bodyBytes = (dataToSend != null) ? dataToSend : new byte[0];
-                      requestBody = RequestBody.create(bodyBytes, MediaType.parse("application/json; charset=utf-8"));
-                  }
+                  headersBuilder.set("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36");
+                  headersBuilder.set("Accept-Language", "ar,en-US;q=0.9,en;q=0.8");
 
-                  okhttp3.Request.Builder okReqBuilder = new okhttp3.Request.Builder()
-                          .url(url)
-                          .method(httpMethod, requestBody);
-
-                  Map<String, List<String>> headers = request.headers();
-                  boolean hasUserAgent = false;
-                  if (headers != null) {
-                      for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-                          String headerName = entry.getKey();
-                          if ("User-Agent".equalsIgnoreCase(headerName)) hasUserAgent = true;
-                          for (String value : entry.getValue()) {
-                              okReqBuilder.addHeader(headerName, value);
+                  Map<String, List<String>> reqHeaders = request.headers();
+                  if (reqHeaders != null) {
+                      for (Map.Entry<String, List<String>> entry : reqHeaders.entrySet()) {
+                          for (String v : entry.getValue()) {
+                              headersBuilder.add(entry.getKey(), v);
                           }
                       }
                   }
-                  if (!hasUserAgent) {
-                      okReqBuilder.addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36");
+
+                  RequestBody requestBody = null;
+                  byte[] dataToSend = request.dataToSend();
+                  if ("POST".equalsIgnoreCase(httpMethod) || "PUT".equalsIgnoreCase(httpMethod)) {
+                      requestBody = RequestBody.create(dataToSend != null ? dataToSend : new byte[0], MediaType.parse("application/json; charset=utf-8"));
                   }
 
-                  okhttp3.Response okResponse = client.newCall(okReqBuilder.build()).execute();
-                  int responseCode = okResponse.code();
+                  okhttp3.Request.Builder okRequestBuilder = new okhttp3.Request.Builder()
+                      .url(url)
+                      .method(httpMethod, requestBody)
+                      .headers(headersBuilder.build());
 
-                  if (responseCode == 429) {
+                  okhttp3.Response okResponse = client.newCall(okRequestBuilder.build()).execute();
+                  int code = okResponse.code();
+
+                  if (code == 429) {
                       okResponse.close();
-                      throw new ReCaptchaException("reCAPTCHA requested by YouTube", url);
+                      throw new ReCaptchaException("YouTube rate limit / verification", url);
                   }
 
                   ResponseBody body = okResponse.body();
-                  String responseBody = (body != null) ? body.string() : "";
-                  String responseMessage = okResponse.message();
+                  String responseBodyString = body != null ? body.string() : "";
+                  String latestUrl = okResponse.request().url().toString();
 
-                  Map<String, List<String>> responseHeaders = new HashMap<>();
+                  Map<String, List<String>> resHeaders = new HashMap<>();
                   for (String name : okResponse.headers().names()) {
-                      responseHeaders.put(name, new ArrayList<>(okResponse.headers(name)));
+                      resHeaders.put(name, okResponse.headers(name));
                   }
 
-                  return new Response(responseCode, responseMessage, responseHeaders, responseBody, okResponse.request().url().toString());
+                  return new Response(code, okResponse.message(), resHeaders, responseBodyString, latestUrl);
               }
           }
           EOF
 
-          cat << 'EOF' > android-project/app/src/main/java/com/edall/platform/WebAppInterface.java
-          package com.edall.platform;
+          # WebAppInterface لربط الجودات مع المنصة
+          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java
+          package app.lovable.edall;
 
+          import android.content.Context;
+          import android.os.Handler;
+          import android.os.Looper;
           import android.webkit.JavascriptInterface;
+          import android.webkit.WebView;
+
           import org.json.JSONArray;
           import org.json.JSONObject;
           import org.schabi.newpipe.extractor.ServiceList;
+          import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor;
           import org.schabi.newpipe.extractor.stream.AudioStream;
           import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
 
-          import java.util.List;
+          import java.util.*;
+          import java.util.concurrent.ConcurrentHashMap;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
 
           public class WebAppInterface {
-              private final MainActivity activity;
+              private final Context context;
+              private final WebView webView;
+              private final Handler mainHandler = new Handler(Looper.getMainLooper());
+              private final ExecutorService executor = Executors.newFixedThreadPool(3);
+              private final Map<String, String> cache = new ConcurrentHashMap<>();
 
-              public WebAppInterface(MainActivity activity) {
-                  this.activity = activity;
+              public WebAppInterface(Context context, WebView webView) {
+                  this.context = context;
+                  this.webView = webView;
               }
 
               @JavascriptInterface
-              public void getYoutubeFormats(final String rawUrl, final String callbackFn) {
-                  new Thread(new Runnable() {
-                      @Override
-                      public void run() {
-                          try {
-                              String videoUrl = rawUrl;
-                              if (videoUrl.contains("youtu.be/")) {
-                                  String id = videoUrl.substring(videoUrl.lastIndexOf('/') + 1).split("\\?")[0];
-                                  videoUrl = "https://www.youtube.com/watch?v=" + id;
-                              } else if (videoUrl.contains("embed/")) {
-                                  String id = videoUrl.substring(videoUrl.indexOf("embed/") + 6).split("\\?")[0];
-                                  videoUrl = "https://www.youtube.com/watch?v=" + id;
+              public void fetchYoutubeFormats(final String videoId, final String callbackId) {
+                  if (videoId == null || videoId.length() < 11) {
+                      sendResult(callbackId, "{\"error\":\"Invalid Video ID\",\"fallback\":true}");
+                      return;
+                  }
+
+                  if (cache.containsKey(videoId)) {
+                      sendResult(callbackId, cache.get(videoId));
+                      return;
+                  }
+
+                  executor.execute(() -> {
+                      try {
+                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube.getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
+                          extractor.fetchPage();
+
+                          String title = extractor.getName();
+                          List<VideoStream> videoStreams = extractor.getVideoStreams();
+                          List<VideoStream> videoOnlyStreams = extractor.getVideoOnlyStreams();
+                          List<AudioStream> audioStreams = extractor.getAudioStreams();
+
+                          AudioStream bestAudio = null;
+                          int maxAbr = -1;
+                          for (AudioStream as : audioStreams) {
+                              if (as.getAverageBitrate() > maxAbr) {
+                                  maxAbr = as.getAverageBitrate();
+                                  bestAudio = as;
                               }
-
-                              StreamInfo streamInfo = StreamInfo.getInfo(ServiceList.YouTube, videoUrl);
-                              List<VideoStream> videoStreams = streamInfo.getVideoStreams();
-                              List<AudioStream> audioStreams = streamInfo.getAudioStreams();
-
-                              JSONObject result = new JSONObject();
-                              JSONArray formatsArray = new JSONArray();
-
-                              for (VideoStream vs : videoStreams) {
-                                  JSONObject fmt = new JSONObject();
-                                  fmt.put("format_id", vs.getFormat() != null ? vs.getFormat().getName() : "mp4");
-                                  fmt.put("resolution", vs.getResolution());
-                                  fmt.put("height", vs.getResolution().replaceAll("[^0-9]", ""));
-                                  fmt.put("ext", vs.getFormat() != null ? vs.getFormat().getSuffix() : "mp4");
-                                  fmt.put("url", vs.getUrl());
-                                  fmt.put("has_audio", !vs.isVideoOnly());
-                                  formatsArray.put(fmt);
-                              }
-
-                              String bestAudioUrl = null;
-                              if (audioStreams != null && !audioStreams.isEmpty()) {
-                                  bestAudioUrl = audioStreams.get(0).getUrl();
-                              }
-
-                              result.put("formats", formatsArray);
-                              result.put("best_audio", bestAudioUrl);
-                              result.put("title", streamInfo.getName());
-                              result.put("duration", streamInfo.getDuration());
-
-                              final String jsonStr = result.toString();
-                              activity.runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() {
-                                      activity.getWebView().evaluateJavascript(callbackFn + "(null, " + jsonStr + ");", null);
-                                  }
-                              });
-                          } catch (final Exception e) {
-                              activity.runOnUiThread(new Runnable() {
-                                  @Override
-                                  public void run() {
-                                      activity.getWebView().evaluateJavascript(
-                                          callbackFn + "(JSON.stringify({error: " + JSONObject.quote(e.getMessage()) + ", fallback: true}), null);",
-                                          null
-                                      );
-                                  }
-                              });
                           }
+
+                          Map<Integer, VideoStream> formatMap = new TreeMap<>(Collections.reverseOrder());
+                          for (VideoStream vs : videoStreams) {
+                              int h = vs.getHeight();
+                              if (h >= 144 && (!formatMap.containsKey(h) || vs.getAverageBitrate() > formatMap.get(h).getAverageBitrate())) {
+                                  formatMap.put(h, vs);
+                              }
+                          }
+
+                          if (bestAudio != null) {
+                              for (VideoStream vs : videoOnlyStreams) {
+                                  int h = vs.getHeight();
+                                  if (h >= 144 && !formatMap.containsKey(h)) {
+                                      formatMap.put(h, vs);
+                                  }
+                              }
+                          }
+
+                          if (formatMap.isEmpty()) {
+                              sendResult(callbackId, "{\"error\":\"No playable streams\",\"fallback\":true}");
+                              return;
+                          }
+
+                          JSONObject result = new JSONObject();
+                          result.put("title", title != null ? title : "Video");
+                          result.put("fallback", false);
+
+                          if (bestAudio != null) {
+                              JSONObject audioObj = new JSONObject();
+                              audioObj.put("url", bestAudio.getUrl());
+                              audioObj.put("expire", System.currentTimeMillis() + 3600000L);
+                              result.put("audio", audioObj);
+                          } else {
+                              result.put("audio", JSONObject.NULL);
+                          }
+
+                          JSONArray videosArr = new JSONArray();
+                          for (Map.Entry<Integer, VideoStream> entry : formatMap.entrySet()) {
+                              VideoStream vs = entry.getValue();
+                              JSONObject vObj = new JSONObject();
+                              vObj.put("h", entry.getKey());
+                              vObj.put("url", vs.getUrl());
+                              vObj.put("hasAudio", vs.isVideoOnly() ? false : true);
+                              vObj.put("expire", System.currentTimeMillis() + 3600000L);
+                              videosArr.put(vObj);
+                          }
+                          result.put("videos", videosArr);
+
+                          String jsonString = result.toString();
+                          cache.put(videoId, jsonString);
+                          sendResult(callbackId, jsonString);
+
+                      } catch (Exception e) {
+                          sendResult(callbackId, "{\"error\":\"" + e.getMessage() + "\",\"fallback\":true}");
                       }
-                  }).start();
+                  });
               }
 
-              @JavascriptInterface
-              public void setVideoFullscreen(final boolean fullscreen) {
-                  activity.runOnUiThread(new Runnable() {
-                      @Override
-                      public void run() {
-                          activity.toggleFullscreen(fullscreen);
-                      }
+              private void sendResult(final String callbackId, final String jsonResult) {
+                  mainHandler.post(() -> {
+                      String safeJson = jsonResult.replace("'", "\\'");
+                      webView.evaluateJavascript("window.__edResolveFormat && window.__edResolveFormat('" + callbackId + "', '" + safeJson + "');", null);
                   });
               }
           }
           EOF
 
-          cat << 'EOF' > android-project/app/src/main/java/com/edall/platform/MainActivity.java
-          package com.edall.platform;
+          # MainActivity تدعم شاشة انقطاع النت وفتح PDF في المتصفح وتفريغ الكاش
+          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/MainActivity.java
+          package app.lovable.edall;
 
           import android.annotation.SuppressLint;
           import android.content.Intent;
-          import android.content.pm.ActivityInfo;
           import android.graphics.Bitmap;
           import android.net.Uri;
           import android.os.Bundle;
           import android.view.View;
+          import android.view.ViewGroup;
           import android.view.WindowManager;
-          import android.webkit.CookieManager;
-          import android.webkit.WebResourceError;
-          import android.webkit.WebResourceRequest;
-          import android.webkit.WebSettings;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
+          import android.webkit.*;
+          import android.widget.FrameLayout;
           import androidx.appcompat.app.AppCompatActivity;
 
           import org.schabi.newpipe.extractor.NewPipe;
@@ -427,61 +438,49 @@ jobs:
 
           public class MainActivity extends AppCompatActivity {
               private WebView webView;
-              private static final String APP_URL = "https://edall.lovable.app/ed_master.html";
-
-              private static final String OFFLINE_HTML = "<!DOCTYPE html><html dir='rtl' lang='ar'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{margin:0;background:#020617;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;padding:20px;text-align:center;box-sizing:border-box}.card{background:#0f172a;border:1px solid #1e293b;border-radius:16px;padding:32px 24px;max-width:400px;width:100%;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5)}.icon{width:64px;height:64px;margin:0 auto 20px;background:rgba(239,68,68,0.1);border-radius:50%;display:flex;align-items:center;justify-content:center;color:#ef4444;font-size:32px}h2{font-size:20px;margin:0 0 12px;font-weight:700}p{color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 24px}button{background:#0ea5e9;color:#fff;border:none;padding:12px 24px;border-radius:10px;font-size:15px;font-weight:600;width:100%;cursor:pointer}</style></head><body><div class='card'><div class='icon'>!</div><h2>لا يوجد اتصال بالإنترنت</h2><p>تحقق من اتصالك بالإنترنت ثم اضغط على زر إعادة المحاولة.</p><button onclick='location.reload()'>إعادة المحاولة</button></div></body></html>";
+              private FrameLayout customViewContainer;
+              private WebChromeClient.CustomViewCallback customViewCallback;
+              private View customView;
+              private static final String PLATFORM_URL = "https://edall.lovable.app/ed_master.html";
 
               private static final String JS_BRIDGE_SHIM =
-                  "window.edallAndroid = true;" +
-                  "(function(){" +
-                  "  try {" +
-                  "    var hero = document.getElementById('desktopDownloadHero');" +
-                  "    if (hero) hero.style.display = 'none';" +
-                  "    var style = document.createElement('style');" +
-                  "    style.innerHTML = '#desktopDownloadHero { display: none !important; }';" +
-                  "    document.head.appendChild(style);" +
-                  "  } catch(e){}" +
-                  "})();" +
-                  "window._edOpenFallback = function(videoUrl) {" +
-                  "  var videoPlayer = document.getElementById('videoPlayer');" +
-                  "  if (!videoPlayer) return;" +
-                  "  var parsed = (function(url){" +
-                  "    var id='';" +
-                  "    if (url.indexOf('youtu.be/') !== -1) id = url.split('youtu.be/')[1].split(/[?#]/)[0];" +
-                  "    else if (url.indexOf('embed/') !== -1) id = url.split('embed/')[1].split(/[?#]/)[0];" +
-                  "    else if (url.indexOf('v=') !== -1) id = url.split('v=')[1].split(/[&#]/)[0];" +
-                  "    return { provider: 'youtube', id: id };" +
-                  "  })(videoUrl);" +
-                  "  if (window._edActivePlayer && typeof window._edActivePlayer.destroy === 'function') {" +
-                  "    window._edActivePlayer.destroy();" +
-                  "  }" +
-                  "  var parent = videoPlayer.parentElement;" +
-                  "  parent.innerHTML = '<div id=\"videoPlayer\" data-plyr-provider=\"youtube\" data-plyr-embed-id=\"' + parsed.id + '\"></div>';" +
-                  "  window._edActivePlayer = new Plyr('#videoPlayer', {" +
-                  "    youtube: { noCookie: true, rel: 0, showinfo: 0, iv_load_policy: 3, modestbranding: 1 }," +
-                  "    controls: ['play-large','play','progress','current-time','duration','mute','volume','fullscreen']" +
-                  "  });" +
-                  "};" +
-                  "window.edallDesktop = {" +
-                  "  isDesktop: true," +
-                  "  getYoutubeFormats: function(url, cb) {" +
-                  "    var cbName = '_ed_cb_' + Date.now() + '_' + Math.floor(Math.random()*1000);" +
-                  "    window[cbName] = function(err, data) {" +
-                  "      delete window[cbName];" +
-                  "      if (err) {" +
-                  "        window._edOpenFallback(url);" +
-                  "      } else if (cb) {" +
-                  "        cb(err, data);" +
-                  "      }" +
-                  "    };" +
-                  "    window.AndroidNative.getYoutubeFormats(url, cbName);" +
-                  "  }," +
-                  "  setVideoFullscreen: function(fs) {" +
-                  "    window.AndroidNative.setVideoFullscreen(fs);" +
-                  "  }" +
-                  "};";
+                  "(function() {" +
+                  "  if (window.__edallAndroidBridgeInjected) return;" +
+                  "  window.__edallAndroidBridgeInjected = true;" +
+                  "  window.__edCallbacks = {};" +
+                  "  window.__edResolveFormat = function(id, raw) {" +
+                  "    if (window.__edCallbacks[id]) {" +
+                  "      try { window.__edCallbacks[id](JSON.parse(raw)); } catch(e) { window.__edCallbacks[id]({ fallback: true }); }" +
+                  "      delete window.__edCallbacks[id];" +
+                  "    }" +
+                  "  };" +
+                  "  window.edallDesktop = {" +
+                  "    isDesktop: true," +
+                  "    isAndroid: true," +
+                  "    version: '3.2.0'," +
+                  "    getYoutubeFormats: function(videoId, force) {" +
+                  "      return new Promise(function(resolve) {" +
+                  "        var cbId = 'cb_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);" +
+                  "        window.__edCallbacks[cbId] = function(res) {" +
+                  "          if (!res || res.error || res.fallback || !res.videos || !res.videos.length) {" +
+                  "            resolve({ fallback: true, error: res ? res.error : 'Format extraction failed' });" +
+                  "          } else {" +
+                  "            resolve(res);" +
+                  "          }" +
+                  "        };" +
+                  "        if (window.AndroidBridge && window.AndroidBridge.fetchYoutubeFormats) {" +
+                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId);" +
+                  "        } else {" +
+                  "          resolve({ fallback: true });" +
+                  "        }" +
+                  "      });" +
+                  "    }," +
+                  "    setVideoFullscreen: function(enabled) { return Promise.resolve(true); }" +
+                  "  };" +
+                  "  var h = document.getElementById('desktopDownloadHero'); if(h) h.style.display = 'none';" +
+                  "})();";
 
-              @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
+              @SuppressLint("SetJavaScriptEnabled")
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
@@ -491,85 +490,115 @@ jobs:
                       NewPipe.init(OkHttpDownloader.getInstance(), Localization.DEFAULT, ContentCountry.DEFAULT);
                   } catch (Exception ignored) {}
 
+                  FrameLayout root = new FrameLayout(this);
                   webView = new WebView(this);
-                  setContentView(webView);
+                  customViewContainer = new FrameLayout(this);
+                  customViewContainer.setVisibility(View.GONE);
+
+                  root.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  root.addView(customViewContainer, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                  setContentView(root);
 
                   WebSettings settings = webView.getSettings();
                   settings.setJavaScriptEnabled(true);
                   settings.setDomStorageEnabled(true);
-                  settings.setDatabaseEnabled(true);
                   settings.setMediaPlaybackRequiresUserGesture(false);
+                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
                   settings.setAllowFileAccess(false);
+                  settings.setAllowContentAccess(false);
                   settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
 
-                  CookieManager.getInstance().setAcceptCookie(true);
-                  CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
-
                   webView.clearCache(true);
-                  webView.addJavascriptInterface(new WebAppInterface(this), "AndroidNative");
+                  webView.addJavascriptInterface(new WebAppInterface(this, webView), "AndroidBridge");
 
                   webView.setWebViewClient(new WebViewClient() {
                       @Override
                       public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                           String url = request.getUrl().toString();
-                          if (url.toLowerCase().endsWith(".pdf") || url.contains(".pdf?") ||
-                              (!url.contains("edall.lovable.app") && !url.contains("lovable.app") && !url.contains("localhost"))) {
-                              try {
-                                  Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-                                  startActivity(intent);
-                                  return true;
-                              } catch (Exception ignored) {}
+                          if (url.startsWith("https://edall.lovable.app")) {
+                              if (url.toLowerCase().endsWith(".pdf") || url.contains("drive.google.com") || url.contains("4shared.com")) {
+                                  try {
+                                      Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                                      startActivity(intent);
+                                      return true;
+                                  } catch (Exception ignored) {}
+                              }
+                              return false;
                           }
-                          return false;
-                      }
-
-                      @Override
-                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                          super.onPageStarted(view, url, favicon);
-                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
-                      }
-
-                      @Override
-                      public void onPageFinished(WebView view, String url) {
-                          super.onPageFinished(view, url);
-                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                          try {
+                              Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                              startActivity(intent);
+                              return true;
+                          } catch (Exception e) {
+                              return true;
+                          }
                       }
 
                       @Override
                       public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                           if (request.isForMainFrame()) {
-                              view.loadDataWithBaseURL(null, OFFLINE_HTML, "text/html", "UTF-8", null);
+                              String offlineHtml = "<!doctype html><html lang='ar' dir='rtl'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
+                                  "<style>body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#f2f2f2;font-family:sans-serif;text-align:center;padding:20px;box-sizing:border-box;}" +
+                                  "button{display:inline-block;padding:14px 32px;border-radius:12px;background:#2f7cf6;color:#fff;border:none;font-weight:700;font-size:1.1rem;margin-top:20px;cursor:pointer;}</style></head>" +
+                                  "<body><div><h2>تحقق من اتصالك بالإنترنت وأعد المحاولة</h2><p>Check your internet connection and retry.</p>" +
+                                  "<button onclick='location.reload()'>إعادة المحاولة</button></div></body></html>";
+                              view.loadDataWithBaseURL(null, offlineHtml, "text/html", "UTF-8", null);
                           }
+                      }
+
+                      @Override
+                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          view.evaluateJavascript(JS_BRIDGE_SHIM, null);
                       }
                   });
 
-                  webView.loadUrl(APP_URL);
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onShowCustomView(View view, CustomViewCallback callback) {
+                          if (customView != null) {
+                              callback.onCustomViewHidden();
+                              return;
+                          }
+                          customView = view;
+                          customViewCallback = callback;
+                          customViewContainer.addView(view);
+                          customViewContainer.setVisibility(View.VISIBLE);
+                          webView.setVisibility(View.GONE);
+                          getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                      }
+
+                      @Override
+                      public void onHideCustomView() {
+                          if (customView == null) return;
+                          customViewContainer.removeView(customView);
+                          customViewContainer.setVisibility(View.GONE);
+                          customView = null;
+                          if (customViewCallback != null) customViewCallback.onCustomViewHidden();
+                          webView.setVisibility(View.VISIBLE);
+                          getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                      }
+                  });
+
+                  webView.loadUrl(PLATFORM_URL);
               }
 
-              public WebView getWebView() {
-                  return webView;
-              }
-
-              public void toggleFullscreen(boolean fullscreen) {
-                  if (fullscreen) {
-                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                      getWindow().getDecorView().setSystemUiVisibility(
-                          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                          | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                          | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                          | View.SYSTEM_UI_FLAG_FULLSCREEN
-                      );
-                  } else {
-                      setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-                      getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
-                  }
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  if (webView != null) webView.clearCache(true);
               }
 
               @Override
               public void onBackPressed() {
-                  if (webView != null && webView.canGoBack()) {
+                  if (customView != null) {
+                      WebChromeClient client = new WebChromeClient();
+                      client.onHideCustomView();
+                  } else if (webView != null && webView.canGoBack()) {
                       webView.goBack();
                   } else {
                       super.onBackPressed();
@@ -578,76 +607,79 @@ jobs:
           }
           EOF
 
-          cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
+      - name: Generate Solid Launcher Icons
+        run: |
+          python3 -c "
+          from PIL import Image, ImageDraw
+          for size, folder in [(48, 'mipmap-mdpi'), (72, 'mipmap-hdpi'), (96, 'mipmap-xhdpi'), (144, 'mipmap-xxhdpi')]:
+              img = Image.new('RGBA', (size, size), (30, 41, 59, 255))
+              draw = ImageDraw.Draw(img)
+              margin = int(size * 0.15)
+              draw.rounded_rectangle([margin, margin, size - margin, size - margin], radius=int(size * 0.2), fill=(47, 124, 246, 255))
+              img.save(f'android-project/app/src/main/res/{folder}/ic_launcher.png')
+          "
+
+      - name: Setup Gradle Wrapper
+        run: |
+          cd android-project
+          cat << 'EOF' > gradle/wrapper/gradle-wrapper.properties
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
           distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
           zipStoreBase=GRADLE_USER_HOME
           zipStorePath=wrapper/dists
           EOF
+          chmod +x gradlew || true
 
       - name: Build Release APK with Gradle
         run: |
           cd android-project
-          chmod +x ../gradlew 2>/dev/null || true
-          gradle wrapper --gradle-version 8.6
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          gradle wrapper
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Sign & Align Release APK
+        env:
+          KEY_PASS: edall_secure_key_2026
         run: |
           set -e
           cd android-project
-
-          KEYSTORE_FILE="/tmp/release.keystore"
-          KEY_ALIAS="edall"
-          KEY_PASSWORD="edall_secure_key_2026"
-
-          keytool -genkeypair -v \
-            -keystore "$KEYSTORE_FILE" \
-            -alias "$KEY_ALIAS" \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10950 \
-            -storepass "$KEY_PASSWORD" \
-            -keypass "$KEY_PASSWORD" \
-            -dname "CN=ED ALL, OU=Education, O=ED ALL Platform, L=Cairo, ST=Cairo, C=EG"
+          KEYSTORE_PATH="/tmp/edall_fixed.keystore"
+          keytool -genkeypair -v -keystore "$KEYSTORE_PATH" \
+            -alias edall -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "$KEY_PASS" -keypass "$KEY_PASS" \
+            -dname "CN=ED ALL, OU=Platform, O=ED ALL Education, L=Cairo, ST=Cairo, C=EG"
 
           UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
           if [ ! -f "$UNSIGNED_APK" ]; then
-            UNSIGNED_APK="app/build/outputs/apk/release/app-release.apk"
+              UNSIGNED_APK=$(find app/build/outputs/apk/release/ -type f -name "*.apk" | head -n 1)
           fi
 
-          BUILD_TOOLS_PATH="$ANDROID_HOME/build-tools/34.0.0"
-          "$BUILD_TOOLS_PATH/zipalign" -v -p 4 "$UNSIGNED_APK" /tmp/aligned.apk
-
-          "$BUILD_TOOLS_PATH/apksigner" sign \
-            --ks "$KEYSTORE_FILE" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass "pass:$KEY_PASSWORD" \
-            --key-pass "pass:$KEY_PASSWORD" \
+          BUILD_TOOLS_DIR="${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS}"
+          "${BUILD_TOOLS_DIR}/zipalign" -v -p 4 "$UNSIGNED_APK" /tmp/aligned.apk
+          "${BUILD_TOOLS_DIR}/apksigner" sign --ks "$KEYSTORE_PATH" \
+            --ks-key-alias edall \
+            --ks-pass "pass:$KEY_PASS" \
+            --key-pass "pass:$KEY_PASS" \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out ../EdAll.apk \
-            /tmp/aligned.apk
-
-          "$BUILD_TOOLS_PATH/apksigner" verify -v ../EdAll.apk
+            --out ../EdAll.apk /tmp/aligned.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EdAll-APK-Release
+          name: EdAll-Android-APK
           path: EdAll.apk
           if-no-files-found: error
-          retention-days: 30
 
       - name: Publish to GitHub Releases
-        continue-on-error: true
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/heads/')
         with:
-          tag_name: "v3.1.0"
-          name: "ED ALL Mobile Platform v3.1.0"
+          tag_name: Education
+          name: 'ED ALL Mobile Platform'
           draft: false
           prerelease: false
           files: EdAll.apk
