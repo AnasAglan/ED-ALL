@@ -37,12 +37,12 @@ jobs:
           Expand-Archive deno.zip -DestinationPath staging\runtime\resources\app\bin\
           Remove-Item deno.zip
 
-          # 4. كتابة ملفات التطبيق الداخلية (package.json, preload.cjs, offline.html)
+          # 4. كتابة ملفات التطبيق الداخلية
           @'
           {
             "name": "edall-desktop",
             "productName": "EdAll",
-            "version": "2.0.0",
+            "version": "2.1.0",
             "private": true,
             "main": "main.cjs"
           }
@@ -53,7 +53,7 @@ jobs:
           if (process.isMainFrame && location.origin === 'https://edall.lovable.app') {
             contextBridge.exposeInMainWorld('edallDesktop', Object.freeze({
               isDesktop: true,
-              version: '2.0.0',
+              version: '2.1.0',
               getYoutubeFormats: (id, force = false) => ipcRenderer.invoke('edall:formats', id, force === true),
               setVideoFullscreen: (enabled) => ipcRenderer.invoke('edall:video-fullscreen', enabled === true)
             }));
@@ -67,7 +67,7 @@ jobs:
           <body><div><h1>تحقق من اتصالك بالإنترنت وأعد تشغيل البرنامج</h1><p>Check your internet connection and restart the app.</p><a href="edall-restart://now">إعادة التشغيل</a></div></body></html>
           '@ | Set-Content staging\runtime\resources\app\offline.html -Encoding UTF8
 
-          # 5. كتابة كود المحرك الرئيسي main.cjs مع دعم ملء الشاشة الكامل
+          # 5. كتابة كود المحرك الرئيسي main.cjs مع دعم الكتابة والقوائم في الأسئلة المقالية
           @'
           const { app, BrowserWindow, ipcMain, Menu, protocol, net, shell } = require('electron');
           const { execFile } = require('node:child_process');
@@ -155,7 +155,7 @@ jobs:
             const dest = path.join(app.getPath('userData'), 'platform.html');
             try {
               const liveUrl = HOME + '?live_sync=' + Date.now();
-              const response = await net.fetch(liveUrl, { bypassCustomProtocolHandlers: true, signal: AbortSignal.timeout(7000), cache: 'no-store' });
+              const response = await net.fetch(liveUrl, { bypassCustomProtocolHandlers: true, signal: AbortSignal.timeout(10000), cache: 'no-store' });
               if (response.ok) {
                 const next = await response.text();
                 if (next.length > 100000 && next.includes('async function _edDesktopOpen') && next.includes('</html>')) {
@@ -171,10 +171,6 @@ jobs:
             return await fs.readFile(path.join(__dirname, 'platform', 'ed_master.html'), 'utf8');
           }
           app.whenReady().then(async () => {
-            const editMenu = Menu.buildFromTemplate([
-              { label: 'Edit', submenu: [ { role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' } ] }
-            ]);
-            Menu.setApplicationMenu(editMenu);
             toolReady = prepareTools();
             ipcMain.handle('edall:formats', (event, id, force) => {
               if (!windowRef || event.sender !== windowRef.webContents || event.senderFrame !== event.sender.mainFrame || new URL(event.senderFrame.url).origin !== ORIGIN || !/^[a-zA-Z0-9_-]{11}$/.test(id)) throw new Error('Access denied');
@@ -216,6 +212,22 @@ jobs:
             windowRef = new BrowserWindow({ width: 1280, height: 850, title: 'EdAll', icon: path.join(__dirname,'icon.ico'), autoHideMenuBar: true,
               webPreferences: { preload: path.join(__dirname,'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false, devTools: false } });
             windowRef.setContentProtection(true);
+
+            // تفعيل قائمة التعديل (القص والنسخ واللصق) تلقائياً عند النقر الأيمن في الأسئلة المقالية
+            windowRef.webContents.on('context-menu', (event, params) => {
+              if (params.isEditable) {
+                Menu.buildFromTemplate([
+                  { role: 'undo', label: 'تراجع' },
+                  { role: 'redo', label: 'إعادة' },
+                  { type: 'separator' },
+                  { role: 'cut', label: 'قص' },
+                  { role: 'copy', label: 'نسخ' },
+                  { role: 'paste', label: 'لصق' },
+                  { role: 'selectAll', label: 'تحديد الكل' }
+                ]).popup({ window: windowRef });
+              }
+            });
+
             const openOutside = raw => { try { const u = new URL(raw); if (u.protocol === 'https:' || u.protocol === 'http:') shell.openExternal(u.href); } catch {} };
             windowRef.webContents.setWindowOpenHandler(({ url }) => { openOutside(url); return { action: 'deny' }; });
             windowRef.webContents.on('will-navigate', (event, raw) => {
@@ -224,7 +236,7 @@ jobs:
             });
             windowRef.webContents.on('will-frame-navigate', (event, details) => { if (!frameAllowed(details.url)) event.preventDefault(); });
             windowRef.webContents.on('will-attach-webview', event => event.preventDefault());
-            windowRef.webContents.on('before-input-event', (event, input) => { if (input.key === 'F12' || (input.control && input.shift && ['i','j','c'].includes(input.key.toLowerCase()))) event.preventDefault(); });
+            windowRef.webContents.on('before-input-event', (event, input) => { if (input.key === 'F12' || (input.control && input.shift && ['i','j','c'].includes((input.key || '').toLowerCase()))) event.preventDefault(); });
             windowRef.webContents.session.setPermissionCheckHandler((_wc, permission) => permission === 'fullscreen');
             windowRef.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => callback(permission === 'fullscreen'));
             const showOffline = () => windowRef.loadFile(path.join(__dirname, 'offline.html'));
@@ -283,7 +295,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: Education
-          name: "EdAll Desktop v2.0"
+          name: "EdAll Desktop v2.1"
           files: EdAll-Setup.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
