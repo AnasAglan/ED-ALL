@@ -35,13 +35,22 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android Build Tools & Platforms
+      - name: Verify Android SDK & Accept Licenses
+        shell: bash
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-${ANDROID_API_LEVEL}" "build-tools;${ANDROID_BUILD_TOOLS}"
+          set -euo pipefail
+          echo "Using preinstalled Android SDK at: $ANDROID_HOME"
+          mkdir -p "$ANDROID_HOME/licenses"
+          printf "24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n84831b9409646a533e3304e4e82ee060481f4dd7\n" > "$ANDROID_HOME/licenses/android-sdk-license"
+          printf "859f317696f67ef43ef2a1a76adc29be0484f789\nd97544112579707560e3931a3606ccd8324f6bef\n" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
+          printf "601085b94cd77f0b54ff86406957099ebe79b4d6\n" > "$ANDROID_HOME/licenses/android-googletv-license"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
+          cache-provider: basic
 
       - name: Scaffold Complete Android Project
         run: |
@@ -50,7 +59,6 @@ jobs:
           mkdir -p android-project/app/src/main/res/values
           mkdir -p android-project/app/src/main/res/mipmap-xxhdpi
           mkdir -p android-project/app/src/main/res/drawable
-          mkdir -p android-project/gradle/wrapper
 
           cat << 'EOF' > android-project/gradle.properties
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
@@ -67,7 +75,7 @@ jobs:
               }
           }
           dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
               repositories {
                   google()
                   mavenCentral()
@@ -395,7 +403,7 @@ jobs:
               private WebView mWebView;
               private boolean isOfflinePageShown = false;
 
-              private static final String OFFLINE_HTML = "<!doctype html><html lang=\"ar\" dir=\"rtl\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\"><title>ED ALL</title><style>*{box-sizing:border-box}body{margin:0;padding:24px;height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#f2f2f2;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center}.box{max-width:380px;width:100%;padding:32px 24px;background:#16181f;border-radius:20px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 16px 36px rgba(0,0,0,0.6)}svg{display:inline-block;margin-bottom:18px}h1{font-size:1.25rem;margin:0 0 10px;font-weight:700;line-height:1.5}p{font-size:0.9rem;opacity:.75;margin:0 0 26px;line-height:1.4}.btn{display:block;width:100%;padding:14px 20px;border-radius:12px;background:#2f7cf6;color:#fff;text-decoration:none;font-weight:700;font-size:1rem;border:none;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent;transition:transform 0.1s,background 0.2s}.btn:active{transform:scale(0.98);background:#2361c4}</style></head><body><div class=\"box\"><svg width=\"56\" height=\"56\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#f87171\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><line x1=\"1\" y1=\"1\" x2=\"23\" y2=\"23\"/><path d=\"M16.72 11.06A10.94 10.94 0 0 1 19 12.55\"/><path d=\"M5 12.55a10.94 10.94 0 0 1 5.17-2.39\"/><path d=\"M10.71 5.05A16 16 0 0 1 22.58 9\"/><path d=\"M1.42 9a15.91 15.91 0 0 1 4.7-2.88\"/><path d=\"M8.53 16.11a6 6 0 0 1 6.95 0\"/><line x1=\"12\" y1=\"20\" x2=\"12.01\" y2=\"20\"/></svg><h1>تحقق من اتصالك بالإنترنت وأعد تشغيل البرنامج</h1><p>Check your internet connection and restart the app.</p><button class=\"btn\" onclick=\"if(window.edallAndroid){window.edallAndroid.reloadApp();}else{location.reload();}\">إعادة التشغيل</button></div></body></html>";
+              private static final String OFFLINE_HTML = "<!doctype html><html lang=\"ar\" dir=\"rtl\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\"><title>ED ALL</title><style>*{box-sizing:border-box}body{margin:0;padding:24px;height:100vh;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#f2f2f2;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center}.box{max-width:380px;width:100%;padding:32px 24px;background:#16181f;border-radius:20px;border:1px solid rgba(255,255,255,0.08);box-shadow:0 16px 36px rgba(0,0,0,0.6)}svg{display:inline-block;margin-bottom:18px}h1{font-size:1.25rem;margin:0 0 10px;font-weight:700;line-height:1.5}p{font-size:0.9rem;opacity:.75;margin:0 0 26px;line-height:1.4}.btn{display:block;width:100%;padding:14px 20px;border-radius:12px;background:#2f7cf6;color:#fff;text-decoration:none;font-weight:700;font-size:1rem;border:none;cursor:pointer;outline:none;-webkit-tap-highlight-color:transparent;transition:transform 0.1s,background 0.2s}.btn:active{transform:scale(0.98);background:#2361c4}</style></head><body><div class=\"box\"><svg width=\"56\" height=\"56\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#f87171\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><line x1=\"1\" y1=\"1\" x2=\"23\" y2=\"23\"/><path d=\"M16.72 11.06A10.94 10.94 0 0 1 19 12.55\"/><path d=\"M5 12.55a10.94 10.94 0 0 1 5.17-2.39\"/><path d=\"M10.71 5.05A16 16 0 0 1 22.58 9\"/><path d=\"M1.42 9a15.91 15.91 0 0 1 4.7-2.88\"/><path d=\"M8.53 16.11a6 6 0 0 1 6.95 0\"/><line x1=\"12\" y1=\"20\" x2=\"12.01\" y2=\"20\"/></svg><h1>تحقق من اتصالك بالإنترنت وأعد تشغيل البرنامج</h1><p>Check your internet connection and restart the app.</p><button class=\"btn\" onclick=\"if(window._AndroidBridge){window._AndroidBridge.reloadApp();}else{location.reload();}\">إعادة التشغيل</button></div></body></html>";
 
               private static final String JS_BRIDGE_SHIM =
                       "(function(){" +
@@ -530,7 +538,6 @@ jobs:
                   if (url == null || url.isEmpty()) return false;
                   String lower = url.toLowerCase();
 
-                  // 1. Protocols for phone, messaging, apps
                   if (url.startsWith("intent:") || url.startsWith("whatsapp:") || url.startsWith("tg:") ||
                           url.startsWith("tel:") || url.startsWith("mailto:")) {
                       try {
@@ -542,23 +549,21 @@ jobs:
                       }
                   }
 
-                  // 2. PDF & Document Files
                   boolean isDocument = lower.endsWith(".pdf") || lower.contains(".pdf?") ||
                           lower.contains("drive.google.com") || lower.contains("4shared.com") ||
                           lower.endsWith(".docx") || lower.endsWith(".doc") ||
                           lower.endsWith(".xlsx") || lower.endsWith(".pptx");
 
-                  // 3. Check if inside platform
                   boolean isOurPlatform = url.startsWith("https://edall.lovable.app") ||
                           url.startsWith("https://id-preview--") ||
                           url.contains("lovable.app/ed_master.html");
 
                   if (isDocument || !isOurPlatform) {
                       openExternal(url);
-                      return true; // Opened in phone browser/PDF viewer
+                      return true;
                   }
 
-                  return false; // Load inside app WebView
+                  return false;
               }
 
               private void configureWebView() {
@@ -691,55 +696,51 @@ jobs:
           EOF
 
           echo '<resources><color name="black">#0f1115</color></resources>' > android-project/app/src/main/res/values/colors.xml
-
-          cat << 'EOF' > android-project/gradle/wrapper/gradle-wrapper.properties
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-
-          curl -sSLo android-project/gradlew https://raw.githubusercontent.com/gradle/gradle/v8.6.0/gradlew
-          chmod +x android-project/gradlew
+          touch android-project/app/proguard-rules.pro
 
       - name: Build Release APK with Gradle
         working-directory: android-project
+        shell: bash
         run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          set -euo pipefail
+          gradle --no-daemon clean :app:assembleRelease --stacktrace
 
-      - name: Production Key Generation & Multi-Scheme Alignment & Signing
+      - name: Sign & Align Release APK
         working-directory: android-project
+        shell: bash
         run: |
+          set -euo pipefail
           UNSIGNED_APK=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
           echo "Found APK: $UNSIGNED_APK"
+          test -s "$UNSIGNED_APK"
 
-          # Generate official RSA 2048 production certificate
-          keytool -genkeypair -v \
-            -keystore edall-release.jks \
-            -alias edall \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass edall_secure_key_2026 \
-            -keypass edall_secure_key_2026 \
-            -dname "CN=ED ALL, OU=Education Platform, O=ED ALL Org, L=Cairo, ST=Cairo, C=EG"
+          KEYSTORE_PATH="edall-release.jks"
+          KEYSTORE_PASSWORD="edall_secure_key_2026"
+          KEY_ALIAS="edall"
+          KEY_PASSWORD="edall_secure_key_2026"
 
-          $ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/zipalign -v -p 4 \
-            "$UNSIGNED_APK" aligned-release.apk
+          cat << 'KEYSTORE_B64_EOF' | base64 --decode > "$KEYSTORE_PATH"
+          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
+          KEYSTORE_B64_EOF
 
-          $ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner sign \
-            --ks edall-release.jks \
-            --ks-key-alias edall \
-            --ks-pass pass:edall_secure_key_2026 \
-            --key-pass pass:edall_secure_key_2026 \
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}"
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED_APK" aligned-release.apk
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --min-sdk-version 24 \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
+            --v4-signing-enabled false \
             --out ../EdAll.apk \
             aligned-release.apk
 
-          $ANDROID_HOME/build-tools/${ANDROID_BUILD_TOOLS}/apksigner verify --verbose ../EdAll.apk
+          "$BUILD_TOOLS/apksigner" verify --verbose ../EdAll.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -750,7 +751,7 @@ jobs:
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        if: success() && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
         with:
           tag_name: Education
           name: 'ED ALL Mobile Platform'
