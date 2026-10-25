@@ -356,7 +356,7 @@ jobs:
                           Map<Integer, VideoStream> formatMap = new TreeMap<>(Collections.reverseOrder());
                           for (VideoStream vs : videoStreams) {
                               int h = vs.getHeight();
-                              if (h >= 144 && (!formatMap.containsKey(h) || vs.getAverageBitrate() > formatMap.get(h).getAverageBitrate())) {
+                              if (h >= 144 && (!formatMap.containsKey(h) || vs.getBitrate() > formatMap.get(h).getBitrate())) {
                                   formatMap.put(h, vs);
                               }
                           }
@@ -637,7 +637,7 @@ jobs:
         run: |
           cd android-project
           gradle --version
-          gradle :app:assembleRelease --no-daemon --stacktrace
+          gradle :app:assembleRelease --no-daemon --stacktrace --info
 
       - name: Sign & Align Release APK
         env:
