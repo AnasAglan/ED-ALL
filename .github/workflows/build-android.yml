@@ -607,6 +607,14 @@ jobs:
           }
           EOF
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Pillow for launcher icon generation
+        run: python -m pip install --upgrade pip Pillow
+
       - name: Generate Solid Launcher Icons
         run: |
           python3 -c "
