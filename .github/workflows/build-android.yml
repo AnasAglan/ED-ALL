@@ -21,6 +21,9 @@ jobs:
     name: Build & Sign Release APK
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Explicit release permission for this job.
+    permissions:
+      contents: write
 
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
@@ -674,14 +677,26 @@ jobs:
           path: EdAll.apk
           if-no-files-found: error
 
-      - name: Publish to GitHub Releases
-        uses: softprops/action-gh-release@v2
+      - name: Publish APK to GitHub Releases
         if: startsWith(github.ref, 'refs/heads/')
-        with:
-          tag_name: Education
-          name: 'ED ALL Mobile Platform'
-          draft: false
-          prerelease: false
-          files: EdAll.apk
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: Education
+          RELEASE_TITLE: ED ALL Mobile Platform
+        run: |
+          set -euo pipefail
+          test -f EdAll.apk
+
+          # Upload only the asset when the release already exists. This avoids
+          # a separate API call to update the existing release metadata.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release '$RELEASE_TAG' exists; uploading APK asset."
+            gh release upload "$RELEASE_TAG" EdAll.apk --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            echo "Release '$RELEASE_TAG' does not exist; creating it."
+            gh release create "$RELEASE_TAG" EdAll.apk \
+              --title "$RELEASE_TITLE" \
+              --notes "Automated ED ALL Android APK build." \
+              --target "$GITHUB_SHA" \
+              --repo "$GITHUB_REPOSITORY"
+          fi
