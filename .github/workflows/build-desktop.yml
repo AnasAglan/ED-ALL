@@ -34,8 +34,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'bin') | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'platform') | Out-Null
 
-          # 1. Restore the previous Electron version 33.2.1 (Windows x64)
-          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v33.2.1/electron-v33.2.1-win32-x64.zip" -OutFile electron.zip
+          # 1. Electron 45.0.0 stable (Windows x64)
+          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v45.0.0/electron-v45.0.0-win32-x64.zip" -OutFile electron.zip
           if (-not (Test-Path 'electron.zip') -or (Get-Item 'electron.zip').Length -lt 50000000) { throw 'Electron archive download is missing or unexpectedly small.' }
           Expand-Archive -LiteralPath electron.zip -DestinationPath 'staging\runtime' -Force
           Remove-Item electron.zip -Force
@@ -49,7 +49,7 @@ jobs:
           Copy-Item 'staging\icon.ico' (Join-Path $appRoot 'icon.ico') -Force
           Invoke-WebRequest -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" -OutFile 'rcedit-x64.exe'
           if (-not (Test-Path 'rcedit-x64.exe') -or (Get-Item 'rcedit-x64.exe').Length -lt 100000) { throw 'rcedit download failed.' }
-          & '.\rcedit-x64.exe' 'staging\runtime\EdAll.exe' --set-icon 'staging\icon.ico' --set-file-version '2.3.0' --set-product-version '2.3.0' --set-version-string 'ProductName' 'EdAll' --set-version-string 'FileDescription' 'EdAll Education Desktop'
+          & '.\rcedit-x64.exe' 'staging\runtime\EdAll.exe' --set-icon 'staging\icon.ico' --set-file-version '2.4.0' --set-product-version '2.4.0' --set-version-string 'ProductName' 'EdAll' --set-version-string 'FileDescription' 'EdAll Education Desktop'
           if ($LASTEXITCODE -ne 0) { throw 'Could not embed the EdAll icon/version resources in EdAll.exe.' }
           Remove-Item 'rcedit-x64.exe' -Force
 
@@ -65,7 +65,10 @@ jobs:
             if (-not $signTool) { throw 'Windows SDK SignTool was not found on the runner.' }
             & $signTool.FullName sign /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 'staging\runtime\EdAll.exe'
             if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing of EdAll.exe failed.' }
-            Write-Host 'EdAll.exe was signed with the supplied certificate.'
+            & $signTool.FullName verify /pa /v 'staging\runtime\EdAll.exe'
+            if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification of EdAll.exe failed.' }
+            Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
+            Write-Host 'EdAll.exe was signed and verified with the supplied certificate.'
           } else {
             Write-Warning 'No Windows code-signing certificate configured; SmartScreen reputation warning may remain.'
           }
@@ -90,7 +93,7 @@ jobs:
           {
             "name": "edall-desktop",
             "productName": "EdAll",
-            "version": "2.3.0",
+            "version": "2.4.0",
             "private": true,
             "main": "main.cjs"
           }
@@ -101,7 +104,7 @@ jobs:
           if (process.isMainFrame && location.origin === 'https://edall.lovable.app') {
             contextBridge.exposeInMainWorld('edallDesktop', Object.freeze({
               isDesktop: true,
-              version: '2.3.0',
+              version: '2.4.0',
               getYoutubeFormats: (id, force = false) => ipcRenderer.invoke('edall:formats', id, force === true),
               setVideoFullscreen: (enabled) => ipcRenderer.invoke('edall:video-fullscreen', enabled === true)
             }));
@@ -126,7 +129,7 @@ jobs:
           const HOME = ORIGIN + '/ed_master.html';
           const streams = new Map(), jobs = new Map(), cache = new Map();
           let windowRef, toolReady;
-          let cachedPlatformHtml = null;
+          let cachedPlatformHtml = null, platformRefreshPromise = null, platformRefreshStartedThisRun = false;
           const getPlatformCachePath = () => path.join(app.getPath('userData'), 'platform.html');
           protocol.registerSchemesAsPrivileged([{ scheme: 'edmedia', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
           const singleInstanceLock = app.requestSingleInstanceLock();
@@ -151,7 +154,7 @@ jobs:
           };
           async function prepareTools() {
             // Use the pinned binaries bundled with the installer directly.
-            // Do not copy large EXEs to userData on every launch.
+            // Avoid copying large EXEs to userData or updating them at runtime.
             const dir = path.join(__dirname, 'bin');
             for (const name of ['yt-dlp.exe', 'deno.exe']) {
               const file = path.join(dir, name);
@@ -222,42 +225,56 @@ jobs:
             return null;
           }
 
-          async function platformSnapshot() {
-            // Refresh only when the page is actually requested (for example, when the app opens
-            // or the user reloads it). There is no background or 15-minute refresh task.
-            const cachePath = getPlatformCachePath();
-            try {
+          async function refreshPlatformCacheOnce() {
+            if (platformRefreshPromise) return platformRefreshPromise;
+            if (platformRefreshStartedThisRun) return null;
+            platformRefreshStartedThisRun = true;
+            platformRefreshPromise = (async () => {
               const response = await net.fetch(HOME + '?live_sync=' + Date.now(), {
                 bypassCustomProtocolHandlers: true,
-                signal: AbortSignal.timeout(10000),
+                signal: AbortSignal.timeout(12000),
                 cache: 'no-store'
               });
-              if (response.ok) {
-                const next = await response.text();
-                if (validPlatformHtml(next)) {
-                  await fs.mkdir(path.dirname(cachePath), { recursive: true });
-                  const tempPath = cachePath + '.tmp';
-                  await fs.writeFile(tempPath, next, 'utf8');
-                  try {
-                    await fs.rename(tempPath, cachePath);
-                  } catch (_) {
-                    await fs.writeFile(cachePath, next, 'utf8');
-                    await fs.rm(tempPath, { force: true }).catch(() => {});
-                  }
-                  cachedPlatformHtml = next;
-                  return next;
-                }
+              if (!response.ok) throw new Error('Platform refresh returned HTTP ' + response.status);
+              const next = await response.text();
+              if (!validPlatformHtml(next)) throw new Error('Downloaded platform HTML failed validation');
+              const cachePath = getPlatformCachePath();
+              await fs.mkdir(path.dirname(cachePath), { recursive: true });
+              const tempPath = cachePath + '.tmp';
+              await fs.writeFile(tempPath, next, 'utf8');
+              try {
+                await fs.rename(tempPath, cachePath);
+              } catch (_) {
+                await fs.writeFile(cachePath, next, 'utf8');
+                await fs.rm(tempPath, { force: true }).catch(() => {});
               }
-            } catch (_) {}
+              cachedPlatformHtml = next;
+              return next;
+            })();
+            try {
+              return await platformRefreshPromise;
+            } catch (_) {
+              return null;
+            } finally {
+              platformRefreshPromise = null;
+            }
+          }
 
-            // If the live site is unavailable, use the last validated cached copy.
+          async function platformSnapshot() {
+            // Fast path: serve validated local HTML immediately. Fetch at most once per app run,
+            // in the background; there is no 15-minute timer and no network wait on each page load.
             const saved = await readPlatformCache();
-            if (saved) return saved;
+            if (saved) {
+              refreshPlatformCacheOnce().catch(() => {});
+              return saved;
+            }
 
-            // If no user cache exists yet, fall back to the HTML bundled with the installer.
+            // First run: serve the checked HTML packaged with the installer immediately.
+            // The background refresh updates the user cache for a later app launch.
             const packaged = await fs.readFile(path.join(__dirname, 'platform', 'ed_master.html'), 'utf8');
             if (validPlatformHtml(packaged)) {
               cachedPlatformHtml = packaged;
+              refreshPlatformCacheOnce().catch(() => {});
               return packaged;
             }
             throw new Error('The platform is unavailable and no valid offline copy exists.');
@@ -335,7 +352,7 @@ jobs:
             const showOffline = () => windowRef.loadFile(path.join(__dirname, 'offline.html'));
             windowRef.webContents.on('did-fail-load', (_e, code, _d, url, isMain) => { if (isMain && code !== -3 && !String(url).startsWith('file:')) showOffline(); });
             // Do not block startup with a separate network preflight. platformSnapshot() will
-            // use the validated local cache immediately, refresh in the background, or fall back.
+            // use the validated local cache immediately and refresh once in the background for this app run.
             try {
               await windowRef.loadURL(HOME);
             } catch (_) {
@@ -357,7 +374,7 @@ jobs:
           node --check 'staging\runtime\resources\app\preload.cjs'
           if ($LASTEXITCODE -ne 0) { throw 'preload.cjs failed JavaScript syntax validation.' }
           $package = Get-Content 'staging\runtime\resources\app\package.json' -Raw | ConvertFrom-Json
-          if ($package.main -ne 'main.cjs' -or $package.version -ne '2.3.0') { throw 'package.json fields are invalid.' }
+          if ($package.main -ne 'main.cjs' -or $package.version -ne '2.4.0') { throw 'package.json fields are invalid.' }
           foreach ($file in @('staging\runtime\EdAll.exe','staging\runtime\resources\app\icon.ico','staging\runtime\resources\app\bin\yt-dlp.exe','staging\runtime\resources\app\bin\deno.exe')) {
             if (-not (Test-Path $file)) { throw "Required application file is missing: $file" }
           }
@@ -466,10 +483,10 @@ jobs:
             Write-Host "Release '$tag' exists; replacing only the EdAll-Setup.exe asset."
             gh release upload $tag 'EdAll-Setup.exe' --clobber --repo $repo
             if ($LASTEXITCODE -ne 0) { throw 'GitHub could not upload the installer asset. Check repository Actions permissions.' }
-            gh release edit $tag --title 'EdAll Desktop v2.3.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
+            gh release edit $tag --title 'EdAll Desktop v2.4.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
             if ($LASTEXITCODE -ne 0) { throw 'Installer uploaded, but GitHub could not update the release title/notes.' }
           } else {
             Write-Host "Release '$tag' was not found; creating it."
-            gh release create $tag 'EdAll-Setup.exe' --title 'EdAll Desktop v2.3.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
+            gh release create $tag 'EdAll-Setup.exe' --title 'EdAll Desktop v2.4.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
             if ($LASTEXITCODE -ne 0) { throw 'GitHub could not create the release. Check repository Actions permissions.' }
           }
