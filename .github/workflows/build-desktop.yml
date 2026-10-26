@@ -102,53 +102,8 @@ jobs:
           @'
           const { contextBridge, ipcRenderer } = require('electron');
 
-          // Electron 33 compatibility: keep ordinary text-entry keys from being intercepted
-          // by page-level keyboard handlers. This does NOT prevent the browser's native edit action,
-          // does NOT enable disabled/read-only controls, and leaves composition/IME events untouched.
-          (function installEditableInputCompatibility() {
-            if (typeof window === 'undefined' || typeof document === 'undefined') return;
-            const editableSelector = 'textarea, input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="number"], input[type="password"], [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
-            function editableFromEvent(event) {
-              const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
-              for (const node of path) {
-                if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') continue;
-                if (node.matches(editableSelector)) return node;
-                if (typeof node.closest === 'function') {
-                  const parent = node.closest(editableSelector);
-                  if (parent) return parent;
-                }
-              }
-              return null;
-            }
-            function canEdit(element) {
-              if (!element || element.disabled || element.readOnly) return false;
-              if (element.getAttribute && element.getAttribute('aria-disabled') === 'true') return false;
-              return true;
-            }
-            function isTextEntryKey(event, element) {
-              const key = String(event.key || '');
-              if (!key || event.isComposing || key === 'Process' || key === 'Dead' || key === 'Unidentified') return false;
-              const tag = String(element.tagName || '').toUpperCase();
-              const multiline = tag === 'TEXTAREA' || element.isContentEditable || element.getAttribute('role') === 'textbox';
-              const editKeys = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
-              if (editKeys.includes(key)) return true;
-              if (key === 'Enter') return multiline;
-              if (event.ctrlKey || event.metaKey) {
-                return ['a', 'c', 'v', 'x', 'z', 'y'].includes(key.toLowerCase());
-              }
-              if (event.altKey) return false;
-              return key.length === 1;
-            }
-            function keepNativeEditing(event) {
-              const element = editableFromEvent(event);
-              if (!canEdit(element) || !isTextEntryKey(event, element)) return;
-              // Do not call preventDefault: native insertion, selection, deletion and clipboard
-              // shortcuts remain available; only page-level handlers are stopped for these keys.
-              event.stopImmediatePropagation();
-            }
-            window.addEventListener('keydown', keepNativeEditing, true);
-            window.addEventListener('keypress', keepNativeEditing, true);
-          })();
+          // Let the website's own exam/editor handlers receive normal keyboard events.
+          // Do not stop keydown/keypress propagation here: custom essay editors can depend on it.
 
           if (process.isMainFrame && location.origin === 'https://edall.lovable.app') {
             contextBridge.exposeInMainWorld('edallDesktop', Object.freeze({
@@ -426,7 +381,8 @@ jobs:
           $package = Get-Content 'staging\runtime\resources\app\package.json' -Raw | ConvertFrom-Json
           if ($package.main -ne 'main.cjs' -or $package.version -ne '2.5.0') { throw 'package.json fields are invalid.' }
           $preloadText = Get-Content 'staging\runtime\resources\app\preload.cjs' -Raw
-          if (-not $preloadText.Contains('installEditableInputCompatibility') -or -not $preloadText.Contains('stopImmediatePropagation')) { throw 'Editable-input compatibility patch is missing.' }
+          if ($preloadText.Contains('stopImmediatePropagation') -or $preloadText.Contains('installEditableInputCompatibility')) { throw 'A keyboard-event interception that may block essay inputs is still present.' }
+          if (-not $preloadText.Contains('contextBridge.exposeInMainWorld')) { throw 'The desktop preload bridge is missing.' }
           $mainText = Get-Content 'staging\runtime\resources\app\main.cjs' -Raw
           if (-not $mainText.Contains('platform-v2.5.0.html')) { throw 'Versioned platform cache configuration is missing.' }
           if ($mainText.Contains('setInterval') -or $mainText.Contains('900000')) { throw 'Recurring background page-refresh code was detected.' }
