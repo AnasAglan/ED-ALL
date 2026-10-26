@@ -1,5 +1,5 @@
-name: Build EdAll Desktop Installer
-run-name: Build EdAll Desktop Installer
+name: Build EdAll Desktop Installer v2.5.0
+run-name: Build EdAll Desktop Installer v2.5.0
 on:
   workflow_dispatch:
   push:
@@ -34,8 +34,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'bin') | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'platform') | Out-Null
 
-          # 1. Electron 45.0.0 stable (Windows x64)
-          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v45.0.0/electron-v45.0.0-win32-x64.zip" -OutFile electron.zip
+          # 1. Electron 33.2.1 (the requested older runtime; Windows x64)
+          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v33.2.1/electron-v33.2.1-win32-x64.zip" -OutFile electron.zip
           if (-not (Test-Path 'electron.zip') -or (Get-Item 'electron.zip').Length -lt 50000000) { throw 'Electron archive download is missing or unexpectedly small.' }
           Expand-Archive -LiteralPath electron.zip -DestinationPath 'staging\runtime' -Force
           Remove-Item electron.zip -Force
@@ -49,7 +49,7 @@ jobs:
           Copy-Item 'staging\icon.ico' (Join-Path $appRoot 'icon.ico') -Force
           Invoke-WebRequest -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" -OutFile 'rcedit-x64.exe'
           if (-not (Test-Path 'rcedit-x64.exe') -or (Get-Item 'rcedit-x64.exe').Length -lt 100000) { throw 'rcedit download failed.' }
-          & '.\rcedit-x64.exe' 'staging\runtime\EdAll.exe' --set-icon 'staging\icon.ico' --set-file-version '2.4.0' --set-product-version '2.4.0' --set-version-string 'ProductName' 'EdAll' --set-version-string 'FileDescription' 'EdAll Education Desktop'
+          & '.\rcedit-x64.exe' 'staging\runtime\EdAll.exe' --set-icon 'staging\icon.ico' --set-file-version '2.5.0' --set-product-version '2.5.0' --set-version-string 'ProductName' 'EdAll' --set-version-string 'FileDescription' 'EdAll Education Desktop'
           if ($LASTEXITCODE -ne 0) { throw 'Could not embed the EdAll icon/version resources in EdAll.exe.' }
           Remove-Item 'rcedit-x64.exe' -Force
 
@@ -93,7 +93,7 @@ jobs:
           {
             "name": "edall-desktop",
             "productName": "EdAll",
-            "version": "2.4.0",
+            "version": "2.5.0",
             "private": true,
             "main": "main.cjs"
           }
@@ -101,10 +101,59 @@ jobs:
 
           @'
           const { contextBridge, ipcRenderer } = require('electron');
+
+          // Electron 33 compatibility: keep ordinary text-entry keys from being intercepted
+          // by page-level keyboard handlers. This does NOT prevent the browser's native edit action,
+          // does NOT enable disabled/read-only controls, and leaves composition/IME events untouched.
+          (function installEditableInputCompatibility() {
+            if (typeof window === 'undefined' || typeof document === 'undefined') return;
+            const editableSelector = 'textarea, input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="number"], input[type="password"], [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+            function editableFromEvent(event) {
+              const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+              for (const node of path) {
+                if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') continue;
+                if (node.matches(editableSelector)) return node;
+                if (typeof node.closest === 'function') {
+                  const parent = node.closest(editableSelector);
+                  if (parent) return parent;
+                }
+              }
+              return null;
+            }
+            function canEdit(element) {
+              if (!element || element.disabled || element.readOnly) return false;
+              if (element.getAttribute && element.getAttribute('aria-disabled') === 'true') return false;
+              return true;
+            }
+            function isTextEntryKey(event, element) {
+              const key = String(event.key || '');
+              if (!key || event.isComposing || key === 'Process' || key === 'Dead' || key === 'Unidentified') return false;
+              const tag = String(element.tagName || '').toUpperCase();
+              const multiline = tag === 'TEXTAREA' || element.isContentEditable || element.getAttribute('role') === 'textbox';
+              const editKeys = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
+              if (editKeys.includes(key)) return true;
+              if (key === 'Enter') return multiline;
+              if (event.ctrlKey || event.metaKey) {
+                return ['a', 'c', 'v', 'x', 'z', 'y'].includes(key.toLowerCase());
+              }
+              if (event.altKey) return false;
+              return key.length === 1;
+            }
+            function keepNativeEditing(event) {
+              const element = editableFromEvent(event);
+              if (!canEdit(element) || !isTextEntryKey(event, element)) return;
+              // Do not call preventDefault: native insertion, selection, deletion and clipboard
+              // shortcuts remain available; only page-level handlers are stopped for these keys.
+              event.stopImmediatePropagation();
+            }
+            window.addEventListener('keydown', keepNativeEditing, true);
+            window.addEventListener('keypress', keepNativeEditing, true);
+          })();
+
           if (process.isMainFrame && location.origin === 'https://edall.lovable.app') {
             contextBridge.exposeInMainWorld('edallDesktop', Object.freeze({
               isDesktop: true,
-              version: '2.4.0',
+              version: '2.5.0',
               getYoutubeFormats: (id, force = false) => ipcRenderer.invoke('edall:formats', id, force === true),
               setVideoFullscreen: (enabled) => ipcRenderer.invoke('edall:video-fullscreen', enabled === true)
             }));
@@ -130,7 +179,8 @@ jobs:
           const streams = new Map(), jobs = new Map(), cache = new Map();
           let windowRef, toolReady;
           let cachedPlatformHtml = null, platformRefreshPromise = null, platformRefreshStartedThisRun = false;
-          const getPlatformCachePath = () => path.join(app.getPath('userData'), 'platform.html');
+          // Versioned cache prevents a stale cache from an older installer from overriding this build.
+          const getPlatformCachePath = () => path.join(app.getPath('userData'), 'platform-v2.5.0.html');
           protocol.registerSchemesAsPrivileged([{ scheme: 'edmedia', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
           const singleInstanceLock = app.requestSingleInstanceLock();
           if (!singleInstanceLock) {
@@ -261,8 +311,8 @@ jobs:
           }
 
           async function platformSnapshot() {
-            // Fast path: serve validated local HTML immediately. Fetch at most once per app run,
-            // in the background; there is no 15-minute timer and no network wait on each page load.
+            // Fast path: serve the validated local HTML immediately. Refresh at most once per app run
+            // in the background; there is no recurring timer and no network wait on page load.
             const saved = await readPlatformCache();
             if (saved) {
               refreshPlatformCacheOnce().catch(() => {});
@@ -374,11 +424,94 @@ jobs:
           node --check 'staging\runtime\resources\app\preload.cjs'
           if ($LASTEXITCODE -ne 0) { throw 'preload.cjs failed JavaScript syntax validation.' }
           $package = Get-Content 'staging\runtime\resources\app\package.json' -Raw | ConvertFrom-Json
-          if ($package.main -ne 'main.cjs' -or $package.version -ne '2.4.0') { throw 'package.json fields are invalid.' }
+          if ($package.main -ne 'main.cjs' -or $package.version -ne '2.5.0') { throw 'package.json fields are invalid.' }
+          $preloadText = Get-Content 'staging\runtime\resources\app\preload.cjs' -Raw
+          if (-not $preloadText.Contains('installEditableInputCompatibility') -or -not $preloadText.Contains('stopImmediatePropagation')) { throw 'Editable-input compatibility patch is missing.' }
+          $mainText = Get-Content 'staging\runtime\resources\app\main.cjs' -Raw
+          if (-not $mainText.Contains('platform-v2.5.0.html')) { throw 'Versioned platform cache configuration is missing.' }
+          if ($mainText.Contains('setInterval') -or $mainText.Contains('900000')) { throw 'Recurring background page-refresh code was detected.' }
           foreach ($file in @('staging\runtime\EdAll.exe','staging\runtime\resources\app\icon.ico','staging\runtime\resources\app\bin\yt-dlp.exe','staging\runtime\resources\app\bin\deno.exe')) {
             if (-not (Test-Path $file)) { throw "Required application file is missing: $file" }
           }
           Write-Host 'Generated JavaScript and bundled runtime files passed validation.'
+
+      # Optional Store path. Configure these Repository Variables using the values assigned
+      # to the app in Partner Center. The Store re-signs approved MSIX packages with Microsoft trust.
+      - name: Build Microsoft Store MSIX package (optional)
+        shell: pwsh
+        env:
+          MSIX_PACKAGE_IDENTITY: ${{ vars.MSIX_PACKAGE_IDENTITY }}
+          MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:MSIX_PACKAGE_IDENTITY) -or [string]::IsNullOrWhiteSpace($env:MSIX_PUBLISHER) -or [string]::IsNullOrWhiteSpace($env:MSIX_PUBLISHER_DISPLAY_NAME)) {
+            Write-Warning 'Skipping Store MSIX: configure MSIX_PACKAGE_IDENTITY, MSIX_PUBLISHER, and MSIX_PUBLISHER_DISPLAY_NAME from Partner Center first.'
+            exit 0
+          }
+          if ($env:MSIX_PACKAGE_IDENTITY -notmatch '^[A-Za-z0-9.-]{3,50}$') { throw 'MSIX_PACKAGE_IDENTITY contains unsupported characters.' }
+          if ($env:MSIX_PUBLISHER.Length -gt 256 -or $env:MSIX_PUBLISHER_DISPLAY_NAME.Length -gt 100) { throw 'MSIX publisher fields are too long.' }
+
+          $msixRoot = Join-Path $PWD 'staging\msix'
+          Remove-Item $msixRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $msixRoot | Out-Null
+          Copy-Item 'staging\runtime\*' $msixRoot -Recurse -Force
+          $assets = Join-Path $msixRoot 'Assets'
+          New-Item -ItemType Directory -Force -Path $assets | Out-Null
+
+          Add-Type -AssemblyName System.Drawing
+          $iconImage = [System.Drawing.Image]::FromFile((Resolve-Path 'staging\icon.ico'))
+          try {
+            foreach ($entry in @(@{ Size = 50; Name = 'StoreLogo.png' }, @{ Size = 150; Name = 'Square150x150Logo.png' }, @{ Size = 44; Name = 'Square44x44Logo.png' })) {
+              $bitmap = [System.Drawing.Bitmap]::new($entry.Size, $entry.Size)
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              try {
+                $graphics.Clear([System.Drawing.Color]::Transparent)
+                $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+                $graphics.DrawImage($iconImage, 0, 0, $entry.Size, $entry.Size)
+                $bitmap.Save((Join-Path $assets $entry.Name), [System.Drawing.Imaging.ImageFormat]::Png)
+              } finally { $graphics.Dispose(); $bitmap.Dispose() }
+            }
+          } finally { $iconImage.Dispose() }
+
+          $identity = [System.Security.SecurityElement]::Escape($env:MSIX_PACKAGE_IDENTITY)
+          $publisher = [System.Security.SecurityElement]::Escape($env:MSIX_PUBLISHER)
+          $publisherDisplay = [System.Security.SecurityElement]::Escape($env:MSIX_PUBLISHER_DISPLAY_NAME)
+          $manifest = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap desktop rescap">
+            <Identity Name="$identity" Publisher="$publisher" Version="2.5.0.0" ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>EdAll</DisplayName>
+              <PublisherDisplayName>$publisherDisplay</PublisherDisplayName>
+              <Logo>Assets\StoreLogo.png</Logo>
+            </Properties>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+            </Dependencies>
+            <Resources><Resource Language="en-us" /></Resources>
+            <Applications>
+              <Application Id="EdAll" Executable="EdAll.exe" EntryPoint="Windows.FullTrustApplication">
+                <uap:VisualElements DisplayName="EdAll" Description="EdAll Education Desktop" BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+                <Extensions>
+                  <uap:Extension Category="windows.protocol">
+                    <uap:Protocol Name="edall"><uap:DisplayName>EdAll</uap:DisplayName></uap:Protocol>
+                  </uap:Extension>
+                </Extensions>
+              </Application>
+            </Applications>
+            <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>
+          </Package>
+          "@
+          [System.IO.File]::WriteAllText((Join-Path $msixRoot 'AppxManifest.xml'), $manifest, [System.Text.UTF8Encoding]::new($false))
+
+          $makeAppx = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $makeAppx) { throw 'makeappx.exe was not found in the Windows SDK.' }
+          & $makeAppx.FullName pack /d $msixRoot /p 'EdAll-Store.msix' /o
+          if ($LASTEXITCODE -ne 0) { throw 'MSIX packaging failed.' }
+          if ((Get-Item 'EdAll-Store.msix').Length -lt 20000000) { throw 'Store MSIX package is unexpectedly small.' }
+          Write-Host 'Store MSIX package created. Submit it through Partner Center for Microsoft signing after certification.'
 
       - name: Compile NSIS Installer
         shell: pwsh
@@ -459,8 +592,17 @@ jobs:
       - name: Upload Installer Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: EdAll-Desktop-Installer
+          name: EdAll-Desktop-Installer-v2.5.0
           path: EdAll-Setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Microsoft Store MSIX artifact (if configured)
+        if: ${{ hashFiles('EdAll-Store.msix') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdAll-Store-MSIX-v2.5.0
+          path: EdAll-Store.msix
           if-no-files-found: error
           retention-days: 30
 
@@ -483,10 +625,10 @@ jobs:
             Write-Host "Release '$tag' exists; replacing only the EdAll-Setup.exe asset."
             gh release upload $tag 'EdAll-Setup.exe' --clobber --repo $repo
             if ($LASTEXITCODE -ne 0) { throw 'GitHub could not upload the installer asset. Check repository Actions permissions.' }
-            gh release edit $tag --title 'EdAll Desktop v2.4.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
+            gh release edit $tag --title 'EdAll Desktop v2.5.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
             if ($LASTEXITCODE -ne 0) { throw 'Installer uploaded, but GitHub could not update the release title/notes.' }
           } else {
             Write-Host "Release '$tag' was not found; creating it."
-            gh release create $tag 'EdAll-Setup.exe' --title 'EdAll Desktop v2.4.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
+            gh release create $tag 'EdAll-Setup.exe' --title 'EdAll Desktop v2.5.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
             if ($LASTEXITCODE -ne 0) { throw 'GitHub could not create the release. Check repository Actions permissions.' }
           }
