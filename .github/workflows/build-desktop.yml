@@ -34,8 +34,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'bin') | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'platform') | Out-Null
 
-          # 1. Electron 45.0.0 stable (Windows x64)
-          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v45.0.0/electron-v45.0.0-win32-x64.zip" -OutFile electron.zip
+          # 1. Restore the previous Electron version 33.2.1 (Windows x64)
+          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v33.2.1/electron-v33.2.1-win32-x64.zip" -OutFile electron.zip
           if (-not (Test-Path 'electron.zip') -or (Get-Item 'electron.zip').Length -lt 50000000) { throw 'Electron archive download is missing or unexpectedly small.' }
           Expand-Archive -LiteralPath electron.zip -DestinationPath 'staging\runtime' -Force
           Remove-Item electron.zip -Force
@@ -126,7 +126,7 @@ jobs:
           const HOME = ORIGIN + '/ed_master.html';
           const streams = new Map(), jobs = new Map(), cache = new Map();
           let windowRef, toolReady;
-          let cachedPlatformHtml = null, platformRefreshPromise = null, lastPlatformRefreshAttempt = 0;
+          let cachedPlatformHtml = null;
           const getPlatformCachePath = () => path.join(app.getPath('userData'), 'platform.html');
           protocol.registerSchemesAsPrivileged([{ scheme: 'edmedia', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } }]);
           const singleInstanceLock = app.requestSingleInstanceLock();
@@ -213,8 +213,7 @@ jobs:
           async function readPlatformCache() {
             if (cachedPlatformHtml && validPlatformHtml(cachedPlatformHtml)) return cachedPlatformHtml;
             try {
-              const cachePath = getPlatformCachePath();
-              const saved = await fs.readFile(cachePath, 'utf8');
+              const saved = await fs.readFile(getPlatformCachePath(), 'utf8');
               if (validPlatformHtml(saved)) {
                 cachedPlatformHtml = saved;
                 return saved;
@@ -223,67 +222,47 @@ jobs:
             return null;
           }
 
-          async function refreshPlatformInBackground() {
-            if (platformRefreshPromise) return platformRefreshPromise;
-            lastPlatformRefreshAttempt = Date.now();
-            platformRefreshPromise = (async () => {
-              const cachePath = getPlatformCachePath();
+          async function platformSnapshot() {
+            // Refresh only when the page is actually requested (for example, when the app opens
+            // or the user reloads it). There is no background or 15-minute refresh task.
+            const cachePath = getPlatformCachePath();
+            try {
               const response = await net.fetch(HOME + '?live_sync=' + Date.now(), {
                 bypassCustomProtocolHandlers: true,
-                signal: AbortSignal.timeout(15000),
+                signal: AbortSignal.timeout(10000),
                 cache: 'no-store'
               });
-              if (!response.ok) throw new Error('Platform refresh returned HTTP ' + response.status);
-              const next = await response.text();
-              if (!validPlatformHtml(next)) throw new Error('Downloaded platform HTML failed validation');
-              await fs.mkdir(path.dirname(cachePath), { recursive: true });
-              const tempPath = cachePath + '.tmp';
-              await fs.writeFile(tempPath, next, 'utf8');
-              try {
-                await fs.rename(tempPath, cachePath);
-              } catch (error) {
-                await fs.writeFile(cachePath, next, 'utf8');
-                await fs.rm(tempPath, { force: true }).catch(() => {});
-              }
-              cachedPlatformHtml = next;
-              return next;
-            })();
-            try {
-              return await platformRefreshPromise;
-            } finally {
-              platformRefreshPromise = null;
-            }
-          }
-
-          async function platformSnapshot() {
-            // Fast path: render the validated cached HTML immediately. Refresh remotely in the
-            // background, so a slow network does not block opening the window on later launches.
-            const saved = await readPlatformCache();
-            if (saved) {
-              if (Date.now() - lastPlatformRefreshAttempt > 15 * 60 * 1000) {
-                lastPlatformRefreshAttempt = Date.now();
-                refreshPlatformInBackground().catch(() => {});
-              }
-              return saved;
-            }
-
-            // First launch: no user cache yet, so fetch once; if offline, use the packaged fallback.
-            try {
-              return await refreshPlatformInBackground();
-            } catch (_) {
-              const packaged = await fs.readFile(path.join(__dirname, 'platform', 'ed_master.html'), 'utf8');
-              if (validPlatformHtml(packaged)) {
-                cachedPlatformHtml = packaged;
-                try {
-                  const cachePath = getPlatformCachePath();
+              if (response.ok) {
+                const next = await response.text();
+                if (validPlatformHtml(next)) {
                   await fs.mkdir(path.dirname(cachePath), { recursive: true });
-                  await fs.writeFile(cachePath, packaged, 'utf8');
-                } catch (_) {}
-                return packaged;
+                  const tempPath = cachePath + '.tmp';
+                  await fs.writeFile(tempPath, next, 'utf8');
+                  try {
+                    await fs.rename(tempPath, cachePath);
+                  } catch (_) {
+                    await fs.writeFile(cachePath, next, 'utf8');
+                    await fs.rm(tempPath, { force: true }).catch(() => {});
+                  }
+                  cachedPlatformHtml = next;
+                  return next;
+                }
               }
-              throw new Error('The platform is unavailable and no valid offline copy exists.');
+            } catch (_) {}
+
+            // If the live site is unavailable, use the last validated cached copy.
+            const saved = await readPlatformCache();
+            if (saved) return saved;
+
+            // If no user cache exists yet, fall back to the HTML bundled with the installer.
+            const packaged = await fs.readFile(path.join(__dirname, 'platform', 'ed_master.html'), 'utf8');
+            if (validPlatformHtml(packaged)) {
+              cachedPlatformHtml = packaged;
+              return packaged;
             }
+            throw new Error('The platform is unavailable and no valid offline copy exists.');
           }
+
           if (singleInstanceLock) app.whenReady().then(async () => {
             toolReady = prepareTools();
             ipcMain.handle('edall:formats', (event, id, force) => {
