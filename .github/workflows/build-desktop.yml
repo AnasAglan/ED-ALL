@@ -1,48 +1,76 @@
 name: Build EdAll Desktop Installer
+run-name: Build EdAll Desktop Installer
 on:
   workflow_dispatch:
   push:
-    paths: ['.github/workflows/**']
+    paths:
+      - ".github/workflows/**"
 
+# GitHub repository Settings must also allow Actions to create/update releases.
 permissions:
   contents: write
+
+concurrency:
+  group: edall-desktop-installer
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Download Electron Runtime & Tools
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path staging\runtime
-          New-Item -ItemType Directory -Force -Path staging\runtime\resources\app\bin
-          New-Item -ItemType Directory -Force -Path staging\runtime\resources\app\platform
+          $ErrorActionPreference = 'Stop'
+          $appRoot = 'staging\runtime\resources\app'
+          New-Item -ItemType Directory -Force -Path 'staging\runtime' | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'bin') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $appRoot 'platform') | Out-Null
 
-          # 1. تنزيل Electron Runtime المخصص لويندوز 64-بت
-          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v33.2.1/electron-v33.2.1-win32-x64.zip" -OutFile electron.zip
-          Expand-Archive electron.zip -DestinationPath staging\runtime
-          Remove-Item electron.zip
-          Rename-Item -Path "staging\runtime\electron.exe" -NewName "EdAll.exe"
+          # 1. Electron 45.0.0 stable (Windows x64)
+          Invoke-WebRequest -Uri "https://github.com/electron/electron/releases/download/v45.0.0/electron-v45.0.0-win32-x64.zip" -OutFile electron.zip
+          if (-not (Test-Path 'electron.zip') -or (Get-Item 'electron.zip').Length -lt 50000000) { throw 'Electron archive download is missing or unexpectedly small.' }
+          Expand-Archive -LiteralPath electron.zip -DestinationPath 'staging\runtime' -Force
+          Remove-Item electron.zip -Force
+          if (-not (Test-Path 'staging\runtime\electron.exe')) { throw 'electron.exe was not found in the Electron archive.' }
+          Rename-Item -Path 'staging\runtime\electron.exe' -NewName 'EdAll.exe'
 
-          # 2. تنزيل أيقونة المنصة وأحدث كود للمنصة
-          Invoke-WebRequest -Uri "https://edall.lovable.app/__l5e/assets-v1/d9e6ad1c-83d1-43cc-8862-35d46ef80b5e/edall.ico" -OutFile staging\icon.ico
-          Copy-Item staging\icon.ico staging\runtime\resources\app\icon.ico
-          Invoke-WebRequest -Uri "https://edall.lovable.app/ed_master.html" -OutFile staging\runtime\resources\app\platform\ed_master.html
+          # 2. Keep the existing EdAll site icon; validate and embed it into the actual .exe too.
+          Invoke-WebRequest -Uri "https://edall.lovable.app/__l5e/assets-v1/d9e6ad1c-83d1-43cc-8862-35d46ef80b5e/edall.ico" -OutFile 'staging\icon.ico'
+          $iconBytes = [System.IO.File]::ReadAllBytes((Resolve-Path 'staging\icon.ico'))
+          if ($iconBytes.Length -lt 1024 -or $iconBytes[0] -ne 0 -or $iconBytes[1] -ne 0 -or $iconBytes[2] -ne 1 -or $iconBytes[3] -ne 0) { throw 'The downloaded EdAll icon is not a valid ICO file.' }
+          Copy-Item 'staging\icon.ico' (Join-Path $appRoot 'icon.ico') -Force
+          Invoke-WebRequest -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" -OutFile 'rcedit-x64.exe'
+          if (-not (Test-Path 'rcedit-x64.exe') -or (Get-Item 'rcedit-x64.exe').Length -lt 100000) { throw 'rcedit download failed.' }
+          & '.\rcedit-x64.exe' 'staging\runtime\EdAll.exe' --set-icon 'staging\icon.ico' --set-file-version '2.2.0' --set-product-version '2.2.0' --set-version-string 'ProductName' 'EdAll' --set-version-string 'FileDescription' 'EdAll Education Desktop'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not embed the EdAll icon/version resources in EdAll.exe.' }
+          Remove-Item 'rcedit-x64.exe' -Force
 
-          # 3. تنزيل أدوات معالجة الفيديو Deno و yt-dlp
-          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile staging\runtime\resources\app\bin\yt-dlp.exe
-          Invoke-WebRequest -Uri "https://github.com/denoland/deno/releases/download/v2.0.0/deno-x86_64-pc-windows-msvc.zip" -OutFile deno.zip
-          Expand-Archive deno.zip -DestinationPath staging\runtime\resources\app\bin\
-          Remove-Item deno.zip
+          # 3. Download a local fallback copy of the platform and validate it.
+          $platformPath = Join-Path $appRoot 'platform\ed_master.html'
+          Invoke-WebRequest -Uri "https://edall.lovable.app/ed_master.html" -OutFile $platformPath
+          $platformHtml = [System.IO.File]::ReadAllText((Resolve-Path $platformPath))
+          if ($platformHtml.Length -lt 100000 -or -not $platformHtml.Contains('async function _edDesktopOpen') -or -not $platformHtml.Contains('</html>')) { throw 'Downloaded platform HTML is incomplete or does not contain the desktop video integration.' }
+
+          # 4. Download pinned current yt-dlp and Deno tools; no self-update at runtime.
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/download/2026.10.21/yt-dlp.exe" -OutFile (Join-Path $appRoot 'bin\yt-dlp.exe')
+          Invoke-WebRequest -Uri "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip" -OutFile 'deno.zip'
+          if (-not (Test-Path (Join-Path $appRoot 'bin\yt-dlp.exe')) -or (Get-Item (Join-Path $appRoot 'bin\yt-dlp.exe')).Length -lt 1000000) { throw 'yt-dlp.exe download failed or is too small.' }
+          if (-not (Test-Path 'deno.zip') -or (Get-Item 'deno.zip').Length -lt 1000000) { throw 'Deno archive download failed or is too small.' }
+          Expand-Archive -LiteralPath deno.zip -DestinationPath (Join-Path $appRoot 'bin') -Force
+          Remove-Item deno.zip -Force
+          if (-not (Test-Path (Join-Path $appRoot 'bin\deno.exe'))) { throw 'deno.exe was not found after extracting Deno.' }
 
           # 4. كتابة ملفات التطبيق الداخلية
           @'
           {
             "name": "edall-desktop",
             "productName": "EdAll",
-            "version": "2.1.0",
+            "version": "2.2.0",
             "private": true,
             "main": "main.cjs"
           }
@@ -53,7 +81,7 @@ jobs:
           if (process.isMainFrame && location.origin === 'https://edall.lovable.app') {
             contextBridge.exposeInMainWorld('edallDesktop', Object.freeze({
               isDesktop: true,
-              version: '2.1.0',
+              version: '2.2.0',
               getYoutubeFormats: (id, force = false) => ipcRenderer.invoke('edall:formats', id, force === true),
               setVideoFullscreen: (enabled) => ipcRenderer.invoke('edall:video-fullscreen', enabled === true)
             }));
@@ -92,7 +120,7 @@ jobs:
             try {
               const url = new URL(raw);
               return url.protocol === 'https:' && [
-                'edall.lovable.app', 'youtube.com', 'youtube-nocookie.com', 'dailymotion.com'
+                'edall.lovable.app', 'youtube.com', 'youtube-nocookie.com', 'dailymotion.com', 'mediadelivery.net', 'bunny.net'
               ].some(host => url.hostname === host || (host !== 'edall.lovable.app' && url.hostname.endsWith('.' + host)));
             } catch { return false; }
           };
@@ -100,10 +128,10 @@ jobs:
             const dir = path.join(app.getPath('userData'), 'tools');
             await fs.mkdir(dir, { recursive: true });
             for (const name of ['yt-dlp.exe', 'deno.exe']) {
+              const source = path.join(__dirname, 'bin', name);
               const dest = path.join(dir, name);
-              try { await fs.access(dest); } catch { await fs.copyFile(path.join(__dirname, 'bin', name), dest); }
+              await fs.copyFile(source, dest);
             }
-            await run(path.join(dir, 'yt-dlp.exe'), ['--update', '--socket-timeout', '10'], 30000).catch(() => {});
             return dir;
           }
           function registerStream(format, commonHeaders) {
@@ -242,7 +270,7 @@ jobs:
             const showOffline = () => windowRef.loadFile(path.join(__dirname, 'offline.html'));
             windowRef.webContents.on('did-fail-load', (_e, code, _d, url, isMain) => { if (isMain && code !== -3 && !String(url).startsWith('file:')) showOffline(); });
             let online = net.isOnline();
-            if (online) { try { const r = await net.fetch(ORIGIN + '/robots.txt', { bypassCustomProtocolHandlers: true, signal: AbortSignal.timeout(8000), cache: 'no-store' }); online = r.ok; } catch { online = false; } }
+            if (online) { try { const r = await net.fetch(HOME, { bypassCustomProtocolHandlers: true, signal: AbortSignal.timeout(10000), cache: 'no-store' }); online = r.ok; } catch { online = false; } }
             if (!online) return showOffline();
             await windowRef.loadURL(HOME);
           }).catch(() => app.quit());
@@ -288,14 +316,51 @@ jobs:
             DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\EdAll"
             RMDir /r "$INSTDIR"
           SectionEnd
-          '@ | Set-Content staging_installer.nsi -Encoding UTF8
+          '@ | Set-Content staging_installer.nsi -Encoding utf8NoBOM
           & "C:\Program Files (x86)\NSIS\makensis.exe" staging_installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "NSIS compilation failed with exit code $LASTEXITCODE." }
 
-      - name: Upload Installer to Release
-        uses: softprops/action-gh-release@v2
+      - name: Validate Installer Output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path 'EdAll-Setup.exe')) { throw 'EdAll-Setup.exe was not created by NSIS.' }
+          $installer = Get-Item 'EdAll-Setup.exe'
+          if ($installer.Length -lt 20000000) { throw "Installer is unexpectedly small ($($installer.Length) bytes)." }
+          Write-Host "Created $($installer.Name) ($($installer.Length) bytes)."
+
+      # Always make the setup file downloadable even if GitHub Release permissions are blocked.
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: Education
-          name: "EdAll Desktop v2.1"
-          files: EdAll-Setup.exe
+          name: EdAll-Desktop-Installer
+          path: EdAll-Setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish Installer to GitHub Release
+        shell: pwsh
+        continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'Education'
+          $repo = $env:GH_REPO
+          $releaseExists = $false
+
+          gh release view $tag --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) { $releaseExists = $true }
+
+          if ($releaseExists) {
+            Write-Host "Release '$tag' exists; replacing only the EdAll-Setup.exe asset."
+            gh release upload $tag 'EdAll-Setup.exe' --clobber --repo $repo
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub could not upload the installer asset. Check repository Actions permissions.' }
+            gh release edit $tag --title 'EdAll Desktop v2.2.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
+            if ($LASTEXITCODE -ne 0) { throw 'Installer uploaded, but GitHub could not update the release title/notes.' }
+          } else {
+            Write-Host "Release '$tag' was not found; creating it."
+            gh release create $tag 'EdAll-Setup.exe' --title 'EdAll Desktop v2.2.0' --notes 'EdAll Desktop installer. Download EdAll-Setup.exe and run it on Windows x64.' --repo $repo
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub could not create the release. Check repository Actions permissions.' }
+          }
