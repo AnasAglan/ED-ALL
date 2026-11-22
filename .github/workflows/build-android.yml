@@ -2,6 +2,9 @@ name: Build & Sign Release APK (ED ALL)
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/build-android.yml'
   push:
     branches:
       - main
@@ -339,6 +342,7 @@ jobs:
               private final Handler mainHandler = new Handler(Looper.getMainLooper());
               private final ExecutorService executor = Executors.newFixedThreadPool(3);
               private final Map<String, String> cache = new ConcurrentHashMap<>();
+              private final Map<String, Long> cacheExpiresAt = new ConcurrentHashMap<>();
 
               public WebAppInterface(Context context, WebView webView) {
                   this.context = context;
@@ -357,16 +361,21 @@ jobs:
               }
 
               @JavascriptInterface
-              public void fetchYoutubeFormats(final String videoId, final String callbackId) {
-                  if (videoId == null || videoId.length() < 11) {
-                      sendResult(callbackId, "{\"error\":\"Invalid Video ID\",\"fallback\":true}");
+              public void fetchYoutubeFormats(final String videoId, final String callbackId, final boolean force) {
+                  if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}")
+                      || callbackId == null || !callbackId.matches("cb_[A-Za-z0-9_-]{1,60}")) {
+                      sendResult(callbackId, "{\"error\":\"Invalid Video ID or callback\",\"fallback\":true}");
                       return;
                   }
 
-                  if (cache.containsKey(videoId)) {
+                  long now = System.currentTimeMillis();
+                  Long cachedUntil = cacheExpiresAt.get(videoId);
+                  if (!force && cache.containsKey(videoId) && cachedUntil != null && cachedUntil > now + 120000L) {
                       sendResult(callbackId, cache.get(videoId));
                       return;
                   }
+                  cache.remove(videoId);
+                  cacheExpiresAt.remove(videoId);
 
                   executor.execute(() -> {
                       try {
@@ -436,18 +445,30 @@ jobs:
 
                           String jsonString = result.toString();
                           cache.put(videoId, jsonString);
+                          cacheExpiresAt.put(videoId, System.currentTimeMillis() + 45 * 60 * 1000L);
                           sendResult(callbackId, jsonString);
 
                       } catch (Exception e) {
-                          sendResult(callbackId, "{\"error\":\"" + e.getMessage() + "\",\"fallback\":true}");
+                          try {
+                              JSONObject error = new JSONObject();
+                              error.put("error", e.getMessage() != null ? e.getMessage() : "NewPipe extraction failed");
+                              error.put("fallback", true);
+                              sendResult(callbackId, error.toString());
+                          } catch (Exception ignored) {
+                              sendResult(callbackId, "{\"error\":\"NewPipe extraction failed\",\"fallback\":true}");
+                          }
                       }
                   });
               }
 
               private void sendResult(final String callbackId, final String jsonResult) {
                   mainHandler.post(() -> {
-                      String safeJson = jsonResult.replace("'", "\\'");
-                      webView.evaluateJavascript("window.__edResolveFormat && window.__edResolveFormat('" + callbackId + "', '" + safeJson + "');", null);
+                      String safeCallbackId = JSONObject.quote(callbackId == null ? "" : callbackId);
+                      String safeJson = JSONObject.quote(jsonResult == null ? "{}" : jsonResult);
+                      webView.evaluateJavascript(
+                          "window.__edResolveFormat && window.__edResolveFormat(" + safeCallbackId + ", " + safeJson + ");",
+                          null
+                      );
                   });
               }
           }
@@ -507,7 +528,7 @@ jobs:
                   "          }" +
                   "        };" +
                   "        if (window.AndroidBridge && window.AndroidBridge.fetchYoutubeFormats) {" +
-                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId);" +
+                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId, force === true);" +
                   "        } else {" +
                   "          resolve({ fallback: true });" +
                   "        }" +
@@ -664,6 +685,24 @@ jobs:
               }
           }
           EOF
+
+      - name: Validate Android NewPipe bridge and extractor isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAVA_FILE="android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java"
+          ACTIVITY_FILE="android-project/app/src/main/java/app/lovable/edall/MainActivity.java"
+          grep -Fq 'NewPipeExtractor:v0.26.5' android-project/app/build.gradle
+          grep -Fq 'YoutubeStreamExtractor' "$JAVA_FILE"
+          grep -Fq 'JSONObject.quote(callbackId' "$JAVA_FILE"
+          grep -Fq 'cacheExpiresAt' "$JAVA_FILE"
+          grep -Fq 'final boolean force' "$JAVA_FILE"
+          grep -Fq 'force === true' "$ACTIVITY_FILE"
+          if grep -Eiq 'piped|invidious|yt-dlp' "$JAVA_FILE"; then
+            echo "Android extractor must remain on NewPipe only."
+            exit 1
+          fi
+          echo "Android NewPipe bridge checks passed."
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
