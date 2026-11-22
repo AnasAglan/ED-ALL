@@ -2,6 +2,11 @@ name: Build & Sign Release APK (ED ALL)
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-android.yml'
   push:
     branches:
       - main
@@ -677,6 +682,11 @@ jobs:
               @Override
               protected void onStop() {
                   if (videoView != null) videoView.stopPlayback();
+                  if (!isFinishing() && !isChangingConfigurations()) {
+                      if (playbackFile != null && playbackFile.exists()) playbackFile.delete();
+                      playbackFile = null;
+                      finish();
+                  }
                   super.onStop();
               }
           
@@ -865,6 +875,7 @@ jobs:
                   okhttp3.Request request = new okhttp3.Request.Builder()
                       .url(supabaseUrl.replaceAll("/+$", "") + "/functions/v1/authorize-offline-download")
                       .header("Authorization", "Bearer " + accessToken)
+                      .header("Origin", "https://edall.lovable.app")
                       .header("apikey", publishableKey)
                       .header("Accept", "application/json")
                       .post(body)
@@ -3514,6 +3525,7 @@ jobs:
           gradle :app:assembleRelease --no-daemon --stacktrace --info
 
       - name: Sign, align, and verify Release APK
+        if: github.event_name != 'pull_request'
         env:
           EDALL_KEYSTORE_BASE64: ${{ secrets.EDALL_KEYSTORE_BASE64 }}
           EDALL_KEYSTORE_PASSWORD: ${{ secrets.EDALL_KEYSTORE_PASSWORD }}
@@ -3560,14 +3572,23 @@ jobs:
           test -s ../EdAll.apk
 
       - name: Upload APK Artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: EdAll-Android-APK
           path: EdAll.apk
           if-no-files-found: error
 
+      - name: Upload unsigned Release APK for pull-request validation
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdAll-Android-Unsigned-PR
+          path: android-project/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+
       - name: Publish APK to GitHub Releases (optional)
-        if: startsWith(github.ref, 'refs/heads/')
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
