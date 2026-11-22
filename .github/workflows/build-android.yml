@@ -692,39 +692,45 @@ jobs:
           # WebAppInterface لربط الجودات مع المنصة
           cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java
           package app.lovable.edall;
-
+          
           import android.content.Context;
+          import android.content.Intent;
+          import android.net.Uri;
           import android.os.Handler;
           import android.os.Looper;
           import android.webkit.JavascriptInterface;
           import android.webkit.WebView;
-
+          import android.widget.Toast;
+          
+          import androidx.appcompat.app.AlertDialog;
+          
           import org.json.JSONArray;
           import org.json.JSONObject;
           import org.schabi.newpipe.extractor.ServiceList;
           import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor;
           import org.schabi.newpipe.extractor.stream.AudioStream;
-          import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
-
+          
+          import java.nio.charset.StandardCharsets;
           import java.util.*;
           import java.util.concurrent.ConcurrentHashMap;
           import java.util.concurrent.ExecutorService;
           import java.util.concurrent.Executors;
-
+          import java.util.concurrent.atomic.AtomicBoolean;
+          
           public class WebAppInterface {
               private final Context context;
               private final WebView webView;
               private final Handler mainHandler = new Handler(Looper.getMainLooper());
               private final ExecutorService executor = Executors.newFixedThreadPool(3);
               private final Map<String, String> cache = new ConcurrentHashMap<>();
-
+              private final AtomicBoolean downloadInProgress = new AtomicBoolean(false);
+          
               public WebAppInterface(Context context, WebView webView) {
                   this.context = context;
                   this.webView = webView;
               }
-
-              // Retry inside this WebView. Do not route the retry button to an external browser.
+          
               @JavascriptInterface
               public void retryLoading() {
                   mainHandler.post(() -> {
@@ -734,102 +740,289 @@ jobs:
                       }
                   });
               }
-
+          
               @JavascriptInterface
               public void fetchYoutubeFormats(final String videoId, final String callbackId) {
-                  if (videoId == null || videoId.length() < 11) {
-                      sendResult(callbackId, "{\"error\":\"Invalid Video ID\",\"fallback\":true}");
+                  if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}") ||
+                      callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}")) {
+                      JSONObject error = new JSONObject();
+                      try { error.put("error", "Invalid YouTube video ID or callback."); error.put("fallback", true); }
+                      catch (Exception ignored) {}
+                      sendResult(callbackId, error.toString());
                       return;
                   }
-
+          
                   if (cache.containsKey(videoId)) {
                       sendResult(callbackId, cache.get(videoId));
                       return;
                   }
-
+          
                   executor.execute(() -> {
                       try {
-                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube.getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
+                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube
+                              .getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
                           extractor.fetchPage();
-
+          
                           String title = extractor.getName();
                           List<VideoStream> videoStreams = extractor.getVideoStreams();
                           List<VideoStream> videoOnlyStreams = extractor.getVideoOnlyStreams();
                           List<AudioStream> audioStreams = extractor.getAudioStreams();
-
+          
                           AudioStream bestAudio = null;
                           int maxAbr = -1;
-                          for (AudioStream as : audioStreams) {
-                              if (as.getAverageBitrate() > maxAbr) {
-                                  maxAbr = as.getAverageBitrate();
-                                  bestAudio = as;
+                          for (AudioStream stream : audioStreams) {
+                              if (stream.getAverageBitrate() > maxAbr) {
+                                  maxAbr = stream.getAverageBitrate();
+                                  bestAudio = stream;
                               }
                           }
-
+          
                           Map<Integer, VideoStream> formatMap = new TreeMap<>(Collections.reverseOrder());
-                          for (VideoStream vs : videoStreams) {
-                              int h = vs.getHeight();
-                              if (h >= 144 && (!formatMap.containsKey(h) || vs.getBitrate() > formatMap.get(h).getBitrate())) {
-                                  formatMap.put(h, vs);
+                          for (VideoStream stream : videoStreams) {
+                              int height = stream.getHeight();
+                              if (height >= 144 && (!formatMap.containsKey(height) ||
+                                  stream.getBitrate() > formatMap.get(height).getBitrate())) {
+                                  formatMap.put(height, stream);
                               }
                           }
-
+          
                           if (bestAudio != null) {
-                              for (VideoStream vs : videoOnlyStreams) {
-                                  int h = vs.getHeight();
-                                  if (h >= 144 && !formatMap.containsKey(h)) {
-                                      formatMap.put(h, vs);
-                                  }
+                              for (VideoStream stream : videoOnlyStreams) {
+                                  int height = stream.getHeight();
+                                  if (height >= 144 && !formatMap.containsKey(height)) formatMap.put(height, stream);
                               }
                           }
-
+          
                           if (formatMap.isEmpty()) {
-                              sendResult(callbackId, "{\"error\":\"No playable streams\",\"fallback\":true}");
+                              JSONObject error = new JSONObject();
+                              error.put("error", "No playable streams");
+                              error.put("fallback", true);
+                              sendResult(callbackId, error.toString());
                               return;
                           }
-
+          
                           JSONObject result = new JSONObject();
                           result.put("title", title != null ? title : "Video");
                           result.put("fallback", false);
-
                           if (bestAudio != null) {
-                              JSONObject audioObj = new JSONObject();
-                              audioObj.put("url", bestAudio.getUrl());
-                              audioObj.put("expire", System.currentTimeMillis() + 3600000L);
-                              result.put("audio", audioObj);
+                              JSONObject audio = new JSONObject();
+                              audio.put("url", bestAudio.getUrl());
+                              audio.put("expire", System.currentTimeMillis() + 3600000L);
+                              result.put("audio", audio);
                           } else {
                               result.put("audio", JSONObject.NULL);
                           }
-
-                          JSONArray videosArr = new JSONArray();
+          
+                          JSONArray videos = new JSONArray();
                           for (Map.Entry<Integer, VideoStream> entry : formatMap.entrySet()) {
-                              VideoStream vs = entry.getValue();
-                              JSONObject vObj = new JSONObject();
-                              vObj.put("h", entry.getKey());
-                              vObj.put("url", vs.getUrl());
-                              vObj.put("hasAudio", vs.isVideoOnly() ? false : true);
-                              vObj.put("expire", System.currentTimeMillis() + 3600000L);
-                              videosArr.put(vObj);
+                              VideoStream stream = entry.getValue();
+                              JSONObject video = new JSONObject();
+                              video.put("h", entry.getKey());
+                              video.put("url", stream.getUrl());
+                              video.put("hasAudio", !stream.isVideoOnly());
+                              video.put("expire", System.currentTimeMillis() + 3600000L);
+                              videos.put(video);
                           }
-                          result.put("videos", videosArr);
-
-                          String jsonString = result.toString();
-                          cache.put(videoId, jsonString);
-                          sendResult(callbackId, jsonString);
-
-                      } catch (Exception e) {
-                          sendResult(callbackId, "{\"error\":\"" + e.getMessage() + "\",\"fallback\":true}");
+                          result.put("videos", videos);
+                          String json = result.toString();
+                          cache.put(videoId, json);
+                          sendResult(callbackId, json);
+                      } catch (Exception error) {
+                          JSONObject result = new JSONObject();
+                          try {
+                              result.put("error", "YouTube extraction failed.");
+                              result.put("fallback", true);
+                          } catch (Exception ignored) {}
+                          sendResult(callbackId, result.toString());
                       }
                   });
               }
-
-              private void sendResult(final String callbackId, final String jsonResult) {
+          
+              private boolean authorizeOfflineDownload(
+                  String supabaseUrl,
+                  String publishableKey,
+                  String accessToken,
+                  String courseId,
+                  String lessonId,
+                  String videoId
+              ) throws Exception {
+                  Uri base = Uri.parse(supabaseUrl == null ? "" : supabaseUrl);
+                  String host = base.getHost() == null ? "" : base.getHost().toLowerCase(Locale.ROOT);
+                  if (!"https".equalsIgnoreCase(base.getScheme()) || !host.endsWith(".supabase.co") ||
+                      publishableKey == null || publishableKey.trim().isEmpty() ||
+                      accessToken == null || accessToken.length() < 40) {
+                      throw new Exception("تعذر التحقق من جلسة المنصة.");
+                  }
+          
+                  JSONObject payload = new JSONObject();
+                  payload.put("course_id", courseId);
+                  payload.put("lesson_id", lessonId);
+                  payload.put("video_id", videoId);
+                  okhttp3.RequestBody body = okhttp3.RequestBody.create(
+                      payload.toString(),
+                      okhttp3.MediaType.parse("application/json; charset=utf-8")
+                  );
+                  okhttp3.Request request = new okhttp3.Request.Builder()
+                      .url(supabaseUrl.replaceAll("/+$", "") + "/functions/v1/authorize-offline-download")
+                      .header("Authorization", "Bearer " + accessToken)
+                      .header("apikey", publishableKey)
+                      .header("Accept", "application/json")
+                      .post(body)
+                      .build();
+          
+                  okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
+                      .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                      .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                      .callTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                      .build();
+                  try (okhttp3.Response response = client.newCall(request).execute()) {
+                      String raw = response.body() == null ? "{}" : response.body().string();
+                      JSONObject result = new JSONObject(raw);
+                      return response.isSuccessful() && result.optBoolean("authorized", false);
+                  }
+              }
+          
+              @JavascriptInterface
+              public void downloadYoutubeVideo(
+                  String videoId,
+                  int quality,
+                  String courseId,
+                  String lessonId,
+                  String accessToken,
+                  String supabaseUrl,
+                  String publishableKey,
+                  String callbackId
+              ) {
+                  if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}") ||
+                      videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}") ||
+                      courseId == null || !courseId.matches("[0-9a-fA-F-]{36}") ||
+                      lessonId == null || !lessonId.matches("[0-9a-fA-F-]{36}")) {
+                      JSONObject error = new JSONObject();
+                      try { error.put("success", false); error.put("error", "طلب تنزيل غير صالح."); }
+                      catch (Exception ignored) {}
+                      sendOfflineResult(callbackId, error.toString());
+                      return;
+                  }
+                  if (!downloadInProgress.compareAndSet(false, true)) {
+                      JSONObject error = new JSONObject();
+                      try { error.put("success", false); error.put("error", "يوجد تنزيل آخر قيد التنفيذ."); }
+                      catch (Exception ignored) {}
+                      sendOfflineResult(callbackId, error.toString());
+                      return;
+                  }
+          
+                  executor.execute(() -> {
+                      try {
+                          if (!authorizeOfflineDownload(supabaseUrl, publishableKey, accessToken, courseId, lessonId, videoId)) {
+                              throw new Exception("هذا الفيديو غير متاح للتنزيل لهذا الحساب أو المحاضرة.");
+                          }
+          
+                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube
+                              .getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
+                          extractor.fetchPage();
+                          List<VideoStream> muxed = extractor.getVideoStreams();
+                          if (muxed == null || muxed.isEmpty()) {
+                              throw new Exception("لا يوجد إصدار مناسب للتنزيل دون اتصال.");
+                          }
+          
+                          int target = Math.max(144, Math.min(2160, quality <= 0 ? 720 : quality));
+                          VideoStream selected = null;
+                          VideoStream lowest = null;
+                          for (VideoStream stream : muxed) {
+                              int height = stream.getHeight();
+                              if (height < 144 || stream.isVideoOnly() || stream.getUrl() == null) continue;
+                              if (lowest == null || height < lowest.getHeight()) lowest = stream;
+                              if (height <= target && (selected == null || height > selected.getHeight())) selected = stream;
+                          }
+                          if (selected == null) selected = lowest;
+                          if (selected == null) {
+                              throw new Exception("لم يعثر NewPipe على فيديو يحتوي على الصوت.");
+                          }
+          
+                          JSONObject saved = OfflineMediaStore.download(
+                              context, videoId, extractor.getName(), selected.getHeight(), selected.getUrl());
+                          saved.put("success", true);
+                          saved.put("message", "تم حفظ الفيديو مشفراً داخل التطبيق.");
+                          sendOfflineResult(callbackId, saved.toString());
+                      } catch (Exception error) {
+                          JSONObject result = new JSONObject();
+                          try {
+                              result.put("success", false);
+                              result.put("error", error.getMessage() == null ? "تعذر تنزيل الفيديو." : error.getMessage());
+                          } catch (Exception ignored) {}
+                          sendOfflineResult(callbackId, result.toString());
+                      } finally {
+                          downloadInProgress.set(false);
+                      }
+                  });
+              }
+          
+              @JavascriptInterface
+              public void openOfflineLibrary() {
                   mainHandler.post(() -> {
-                      String safeJson = jsonResult.replace("'", "\\'");
-                      webView.evaluateJavascript("window.__edResolveFormat && window.__edResolveFormat('" + callbackId + "', '" + safeJson + "');", null);
+                      try {
+                          List<JSONObject> items = OfflineMediaStore.list(context);
+                          if (items.isEmpty()) {
+                              Toast.makeText(context, "لا توجد فيديوهات محفوظة بعد.", Toast.LENGTH_LONG).show();
+                              return;
+                          }
+                          String[] labels = new String[items.size()];
+                          for (int i = 0; i < items.size(); i++) {
+                              JSONObject item = items.get(i);
+                              labels[i] = item.optString("title", "ED-ALL video") + " — " +
+                                  item.optInt("height", 0) + "p";
+                          }
+                          new AlertDialog.Builder(context)
+                              .setTitle("الفيديوهات المحفوظة")
+                              .setItems(labels, (dialog, index) -> {
+                                  JSONObject item = items.get(index);
+                                  String id = item.optString("id");
+                                  new AlertDialog.Builder(context)
+                                      .setTitle(item.optString("title", "ED-ALL video"))
+                                      .setItems(new String[]{"تشغيل", "حذف من الجهاز"}, (inner, action) -> {
+                                          if (action == 0) {
+                                              Intent intent = new Intent(context, OfflinePlayerActivity.class);
+                                              intent.putExtra("offline_video_id", id);
+                                              context.startActivity(intent);
+                                          } else {
+                                              try {
+                                                  OfflineMediaStore.delete(context, id);
+                                                  Toast.makeText(context, "تم حذف الفيديو المحفوظ.", Toast.LENGTH_SHORT).show();
+                                              } catch (Exception error) {
+                                                  Toast.makeText(context, "تعذر حذف الفيديو.", Toast.LENGTH_LONG).show();
+                                              }
+                                          }
+                                      })
+                                      .setNegativeButton("إغلاق", null)
+                                      .show();
+                              })
+                              .setNegativeButton("إغلاق", null)
+                              .show();
+                      } catch (Exception error) {
+                          Toast.makeText(context, "تعذر فتح مكتبة الفيديوهات.", Toast.LENGTH_LONG).show();
+                      }
+                  });
+              }
+          
+              private void sendOfflineResult(final String callbackId, final String jsonResult) {
+                  if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}")) return;
+                  mainHandler.post(() -> {
+                      String script = "window.__edResolveOffline && window.__edResolveOffline(" +
+                          JSONObject.quote(callbackId) + "," + JSONObject.quote(jsonResult) + ");";
+                      webView.evaluateJavascript(script, null);
+                  });
+              }
+          
+              private void sendResult(final String callbackId, final String jsonResult) {
+                  if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}")) return;
+                  mainHandler.post(() -> {
+                      String script = "window.__edResolveFormat && window.__edResolveFormat(" +
+                          JSONObject.quote(callbackId) + "," + JSONObject.quote(jsonResult) + ");";
+                      webView.evaluateJavascript(script, null);
                   });
               }
           }
+          
           EOF
 
           # MainActivity تدعم شاشة انقطاع النت وفتح PDF في المتصفح وتفريغ الكاش
@@ -871,6 +1064,12 @@ jobs:
                   "      delete window.__edCallbacks[id];" +
                   "    }" +
                   "  };" +
+                  "  window.__edOfflineCallbacks = {};" +
+                  "  window.__edResolveOffline = function(id, raw) {" +
+                  "    var fn = window.__edOfflineCallbacks[id]; if (!fn) return;" +
+                  "    try { fn(JSON.parse(raw)); } catch(e) { fn({success:false,error:'Invalid native response'}); }" +
+                  "    delete window.__edOfflineCallbacks[id];" +
+                  "  };" +
                   "  window.edallDesktop = {" +
                   "    isDesktop: true," +
                   "    isAndroid: true," +
@@ -892,6 +1091,16 @@ jobs:
                   "        }" +
                   "      });" +
                   "    }," +
+                  "    downloadOfflineVideo: function(videoId, quality, courseId, lessonId, accessToken, supabaseUrl, publishableKey) {" +
+                  "      return new Promise(function(resolve) {" +
+                  "        var cbId = 'off_' + Date.now() + '_' + Math.random().toString(36).substr(2, 7);" +
+                  "        window.__edOfflineCallbacks[cbId] = resolve;" +
+                  "        if (window.AndroidBridge && window.AndroidBridge.downloadYoutubeVideo) {" +
+                  "          window.AndroidBridge.downloadYoutubeVideo(videoId, Number(quality)||720, courseId, lessonId, accessToken, supabaseUrl, publishableKey, cbId);" +
+                  "        } else { resolve({success:false,error:'Android download bridge unavailable'}); }" +
+                  "      });" +
+                  "    }," +
+                  "    openOfflineLibrary: function() { if (window.AndroidBridge && window.AndroidBridge.openOfflineLibrary) window.AndroidBridge.openOfflineLibrary(); }," +
                   "    setVideoFullscreen: function(enabled) { return Promise.resolve(true); }" +
                   "  };" +
                   "  var h = document.getElementById('desktopDownloadHero'); if(h) h.style.display = 'none';" +
@@ -903,6 +1112,7 @@ jobs:
                   super.onCreate(savedInstanceState);
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
+                  OfflineMediaStore.cleanupPlaybackCache(this);
                   try {
                       NewPipe.init(OkHttpDownloader.getInstance(), Localization.DEFAULT, ContentCountry.DEFAULT);
                   } catch (Exception ignored) {}
