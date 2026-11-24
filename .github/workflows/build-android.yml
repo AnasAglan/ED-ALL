@@ -403,11 +403,15 @@ jobs:
           
               public static JSONObject download(
                   Context context,
+                  String userId,
                   String videoId,
                   String title,
                   int height,
                   String streamUrl
               ) throws Exception {
+                  if (userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                      throw new Exception("تعذر ربط الفيديو بالحساب الحالي.");
+                  }
                   if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}")) {
                       throw new Exception("Invalid YouTube video ID.");
                   }
@@ -447,7 +451,7 @@ jobs:
           
                       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
                       cipher.init(Cipher.ENCRYPT_MODE, encryptionKey());
-                      cipher.updateAAD(id.getBytes(StandardCharsets.UTF_8));
+                      cipher.updateAAD((id + ":" + userId).getBytes(StandardCharsets.UTF_8));
                       byte[] iv = cipher.getIV();
                       long written = 0;
           
@@ -477,6 +481,7 @@ jobs:
           
                       JSONObject metadata = new JSONObject();
                       metadata.put("id", id);
+                      metadata.put("userId", userId);
                       metadata.put("videoId", videoId);
                       metadata.put("title", title == null || title.trim().isEmpty() ? "ED-ALL video" : title.trim());
                       metadata.put("height", height);
@@ -502,7 +507,10 @@ jobs:
                   }
               }
           
-              public static List<JSONObject> list(Context context) throws Exception {
+              public static List<JSONObject> list(Context context, String userId) throws Exception {
+                  if (userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                      throw new Exception("تعذر التحقق من الحساب الحالي.");
+                  }
                   File directory = root(context);
                   File[] files = directory.listFiles((dir, name) -> name.endsWith(".json"));
                   List<JSONObject> items = new ArrayList<>();
@@ -513,7 +521,8 @@ jobs:
                           byte[] buffer = new byte[8192];
                           int count;
                           while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
-                          items.add(new JSONObject(bytes.toString("UTF-8")));
+                          JSONObject item = new JSONObject(bytes.toString("UTF-8"));
+                          if (userId.equals(item.optString("userId"))) items.add(item);
                       } catch (Exception invalid) {
                           // Invalid metadata is ignored; the encrypted payload is never opened.
                       }
@@ -523,8 +532,9 @@ jobs:
                   return items;
               }
           
-              public static File decryptToCache(Context context, String id) throws Exception {
-                  if (id == null || !id.matches("[0-9a-fA-F-]{36}")) {
+              public static File decryptToCache(Context context, String id, String userId) throws Exception {
+                  if (id == null || !id.matches("[0-9a-fA-F-]{36}") ||
+                      userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
                       throw new Exception("Invalid offline video identifier.");
                   }
                   File directory = root(context);
@@ -543,6 +553,10 @@ jobs:
                       metadata = new JSONObject(bytes.toString("UTF-8"));
                   }
           
+                  if (!userId.equals(metadata.optString("userId"))) {
+                      throw new Exception("هذا الفيديو محفوظ لحساب آخر على الجهاز.");
+                  }
+
                   File cache = new File(context.getCacheDir(), "edall-offline-playback-" + id + ".media");
                   File partial = new File(context.getCacheDir(), "edall-offline-playback-" + id + ".partial");
                   try (DataInputStream raw = new DataInputStream(new BufferedInputStream(new FileInputStream(encryptedFile)))) {
@@ -553,7 +567,7 @@ jobs:
                       raw.readFully(iv);
                       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
                       cipher.init(Cipher.DECRYPT_MODE, encryptionKey(), new GCMParameterSpec(TAG_BITS, iv));
-                      cipher.updateAAD(id.getBytes(StandardCharsets.UTF_8));
+                      cipher.updateAAD((id + ":" + userId).getBytes(StandardCharsets.UTF_8));
                       try (CipherInputStream decrypted = new CipherInputStream(raw, cipher);
                            FileOutputStream output = new FileOutputStream(partial)) {
                           byte[] buffer = new byte[64 * 1024];
@@ -652,7 +666,8 @@ jobs:
           
                   new Thread(() -> {
                       try {
-                          File ready = OfflineMediaStore.decryptToCache(this, id);
+                          String userId = getIntent().getStringExtra("offline_user_id");
+                          File ready = OfflineMediaStore.decryptToCache(this, id, userId);
                           runOnUiThread(() -> {
                               playbackFile = ready;
                               progress.setVisibility(View.GONE);
@@ -854,7 +869,7 @@ jobs:
                   });
               }
           
-              private boolean authorizeOfflineDownload(
+              private String authorizeOfflineDownload(
                   String supabaseUrl,
                   String publishableKey,
                   String accessToken,
@@ -895,7 +910,12 @@ jobs:
                   try (okhttp3.Response response = client.newCall(request).execute()) {
                       String raw = response.body() == null ? "{}" : response.body().string();
                       JSONObject result = new JSONObject(raw);
-                      return response.isSuccessful() && result.optBoolean("authorized", false);
+                      if (!response.isSuccessful() || !result.optBoolean("authorized", false)) return null;
+                      String authorizedUserId = result.optString("user_id", "");
+                      if (!authorizedUserId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                          throw new Exception("الخادم لم يُرجع هوية الحساب المصرّح له.");
+                      }
+                      return authorizedUserId;
                   }
               }
           
@@ -930,7 +950,8 @@ jobs:
           
                   executor.execute(() -> {
                       try {
-                          if (!authorizeOfflineDownload(supabaseUrl, publishableKey, accessToken, courseId, lessonId, videoId)) {
+                          String authorizedUserId = authorizeOfflineDownload(supabaseUrl, publishableKey, accessToken, courseId, lessonId, videoId);
+                          if (authorizedUserId == null) {
                               throw new Exception("هذا الفيديو غير متاح للتنزيل لهذا الحساب أو المحاضرة.");
                           }
           
@@ -957,7 +978,7 @@ jobs:
                           }
           
                           JSONObject saved = OfflineMediaStore.download(
-                              context, videoId, extractor.getName(), selected.getHeight(), selected.getUrl());
+                              context, authorizedUserId, videoId, extractor.getName(), selected.getHeight(), selected.getUrl());
                           saved.put("success", true);
                           saved.put("message", "تم حفظ الفيديو مشفراً داخل التطبيق.");
                           sendOfflineResult(callbackId, saved.toString());
@@ -975,10 +996,14 @@ jobs:
               }
           
               @JavascriptInterface
-              public void openOfflineLibrary() {
+              public void openOfflineLibrary(final String userId) {
+                  if (userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                      Toast.makeText(context, "سجّل الدخول لعرض فيديوهات هذا الحساب.", Toast.LENGTH_LONG).show();
+                      return;
+                  }
                   mainHandler.post(() -> {
                       try {
-                          List<JSONObject> items = OfflineMediaStore.list(context);
+                          List<JSONObject> items = OfflineMediaStore.list(context, userId);
                           if (items.isEmpty()) {
                               Toast.makeText(context, "لا توجد فيديوهات محفوظة بعد.", Toast.LENGTH_LONG).show();
                               return;
@@ -1000,6 +1025,7 @@ jobs:
                                           if (action == 0) {
                                               Intent intent = new Intent(context, OfflinePlayerActivity.class);
                                               intent.putExtra("offline_video_id", id);
+                                              intent.putExtra("offline_user_id", userId);
                                               context.startActivity(intent);
                                           } else {
                                               try {
@@ -1117,7 +1143,7 @@ jobs:
                   "        } else { resolve({success:false,error:'Android download bridge unavailable'}); }" +
                   "      });" +
                   "    }," +
-                  "    openOfflineLibrary: function() { if (window.AndroidBridge && window.AndroidBridge.openOfflineLibrary) window.AndroidBridge.openOfflineLibrary(); }," +
+                  "    openOfflineLibrary: function(userId) { if (window.AndroidBridge && window.AndroidBridge.openOfflineLibrary) window.AndroidBridge.openOfflineLibrary(userId || ''); }," +
                   "    setVideoFullscreen: function(enabled) { return Promise.resolve(true); }" +
                   "  };" +
                   "  var h = document.getElementById('desktopDownloadHero'); if(h) h.style.display = 'none';" +
