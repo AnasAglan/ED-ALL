@@ -734,6 +734,7 @@ jobs:
               private final Handler mainHandler = new Handler(Looper.getMainLooper());
               private final ExecutorService executor = Executors.newFixedThreadPool(3);
               private final Map<String, String> cache = new ConcurrentHashMap<>();
+              private final Map<String, Long> cacheExpiresAt = new ConcurrentHashMap<>();
               private final AtomicBoolean downloadInProgress = new AtomicBoolean(false);
           
               public WebAppInterface(Context context, WebView webView) {
@@ -752,9 +753,9 @@ jobs:
               }
           
               @JavascriptInterface
-              public void fetchYoutubeFormats(final String videoId, final String callbackId) {
+              public void fetchYoutubeFormats(final String videoId, final String callbackId, final boolean force) {
                   if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}") ||
-                      callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}")) {
+                      callbackId == null || !callbackId.matches("cb_[A-Za-z0-9_-]{1,60}")) {
                       JSONObject error = new JSONObject();
                       try { error.put("error", "Invalid YouTube video ID or callback."); error.put("fallback", true); }
                       catch (Exception ignored) {}
@@ -762,10 +763,14 @@ jobs:
                       return;
                   }
           
-                  if (cache.containsKey(videoId)) {
+                  long now = System.currentTimeMillis();
+                  Long cachedUntil = cacheExpiresAt.get(videoId);
+                  if (!force && cache.containsKey(videoId) && cachedUntil != null && cachedUntil > now + 120000L) {
                       sendResult(callbackId, cache.get(videoId));
                       return;
                   }
+                  cache.remove(videoId);
+                  cacheExpiresAt.remove(videoId);
           
                   executor.execute(() -> {
                       try {
@@ -836,6 +841,7 @@ jobs:
                           result.put("videos", videos);
                           String json = result.toString();
                           cache.put(videoId, json);
+                          cacheExpiresAt.put(videoId, System.currentTimeMillis() + 45 * 60 * 1000L);
                           sendResult(callbackId, json);
                       } catch (Exception error) {
                           JSONObject result = new JSONObject();
@@ -1096,7 +1102,7 @@ jobs:
                   "          }" +
                   "        };" +
                   "        if (window.AndroidBridge && window.AndroidBridge.fetchYoutubeFormats) {" +
-                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId);" +
+                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId, force === true);" +
                   "        } else {" +
                   "          resolve({ fallback: true });" +
                   "        }" +
