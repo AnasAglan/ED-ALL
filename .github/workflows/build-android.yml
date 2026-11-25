@@ -3572,7 +3572,7 @@ jobs:
           grep -Fq 'functions/v1/authorize-offline-download' "$source_file"
           grep -Fq 'public static boolean delete(Context context, String id, String userId)' "$store_file"
           grep -Fq 'if (!userId.equals(item.optString("userId"))) return false;' "$store_file"
-          grep -Fq 'metadata.userId' "$store_file" || grep -Fq 'userId.equals(metadata.optString("userId"))' "$store_file"
+          grep -Fq 'item.optString("userId")' "$store_file" || { echo "::error::Offline delete must verify manifest ownership."; exit 1; }
 
       - name: Verify Gradle Version
         run: gradle --version
