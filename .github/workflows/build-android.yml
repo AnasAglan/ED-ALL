@@ -409,7 +409,7 @@ jobs:
                   int height,
                   String streamUrl
               ) throws Exception {
-                  if (userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                  if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
                       throw new Exception("تعذر ربط الفيديو بالحساب الحالي.");
                   }
                   if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}")) {
@@ -508,7 +508,7 @@ jobs:
               }
           
               public static List<JSONObject> list(Context context, String userId) throws Exception {
-                  if (userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                  if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
                       throw new Exception("تعذر التحقق من الحساب الحالي.");
                   }
                   File directory = root(context);
@@ -533,8 +533,8 @@ jobs:
               }
           
               public static File decryptToCache(Context context, String id, String userId) throws Exception {
-                  if (id == null || !id.matches("[0-9a-fA-F-]{36}") ||
-                      userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                  if (id == null || !id.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}") ||
+                      userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
                       throw new Exception("Invalid offline video identifier.");
                   }
                   File directory = root(context);
@@ -589,13 +589,24 @@ jobs:
                   }
               }
           
-              public static boolean delete(Context context, String id) throws Exception {
-                  if (id == null || !id.matches("[0-9a-fA-F-]{36}")) return false;
+              public static boolean delete(Context context, String id, String userId) throws Exception {
+                  if (id == null || !id.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}") ||
+                      userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) return false;
                   File directory = root(context);
                   File media = new File(directory, id + ".edv");
                   File metadata = new File(directory, id + ".json");
+                  if (!metadata.isFile()) return false;
+                  JSONObject item;
+                  try (FileInputStream input = new FileInputStream(metadata);
+                       ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                      byte[] buffer = new byte[4096];
+                      int count;
+                      while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
+                      item = new JSONObject(bytes.toString("UTF-8"));
+                  }
+                  if (!userId.equals(item.optString("userId"))) return false;
                   boolean a = !media.exists() || media.delete();
-                  boolean b = !metadata.exists() || metadata.delete();
+                  boolean b = metadata.delete();
                   return a && b;
               }
           
@@ -879,7 +890,11 @@ jobs:
               ) throws Exception {
                   Uri base = Uri.parse(supabaseUrl == null ? "" : supabaseUrl);
                   String host = base.getHost() == null ? "" : base.getHost().toLowerCase(Locale.ROOT);
-                  if (!"https".equalsIgnoreCase(base.getScheme()) || !host.endsWith(".supabase.co") ||
+                  if (!"https".equalsIgnoreCase(base.getScheme()) ||
+                      !(host.endsWith(".supabase.co") || host.endsWith(".lovable.cloud")) ||
+                      base.getUserInfo() != null || base.getPort() != -1 ||
+                      (base.getPath() != null && !base.getPath().isEmpty() && !"/".equals(base.getPath())) ||
+                      base.getQuery() != null || base.getFragment() != null ||
                       publishableKey == null || publishableKey.trim().isEmpty() ||
                       accessToken == null || accessToken.length() < 40) {
                       throw new Exception("تعذر التحقق من جلسة المنصة.");
@@ -912,7 +927,7 @@ jobs:
                       JSONObject result = new JSONObject(raw);
                       if (!response.isSuccessful() || !result.optBoolean("authorized", false)) return null;
                       String authorizedUserId = result.optString("user_id", "");
-                      if (!authorizedUserId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                      if (!authorizedUserId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
                           throw new Exception("الخادم لم يُرجع هوية الحساب المصرّح له.");
                       }
                       return authorizedUserId;
@@ -932,8 +947,8 @@ jobs:
               ) {
                   if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}") ||
                       videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}") ||
-                      courseId == null || !courseId.matches("[0-9a-fA-F-]{36}") ||
-                      lessonId == null || !lessonId.matches("[0-9a-fA-F-]{36}")) {
+                      courseId == null || !courseId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}") ||
+                      lessonId == null || !lessonId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
                       JSONObject error = new JSONObject();
                       try { error.put("success", false); error.put("error", "طلب تنزيل غير صالح."); }
                       catch (Exception ignored) {}
@@ -997,7 +1012,7 @@ jobs:
           
               @JavascriptInterface
               public void openOfflineLibrary(final String userId) {
-                  if (userId == null || !userId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
+                  if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
                       Toast.makeText(context, "سجّل الدخول لعرض فيديوهات هذا الحساب.", Toast.LENGTH_LONG).show();
                       return;
                   }
@@ -1029,7 +1044,7 @@ jobs:
                                               context.startActivity(intent);
                                           } else {
                                               try {
-                                                  OfflineMediaStore.delete(context, id);
+                                                  OfflineMediaStore.delete(context, id, userId);
                                                   Toast.makeText(context, "تم حذف الفيديو المحفوظ.", Toast.LENGTH_SHORT).show();
                                               } catch (Exception error) {
                                                   Toast.makeText(context, "تعذر حذف الفيديو.", Toast.LENGTH_LONG).show();
@@ -3546,6 +3561,18 @@ jobs:
           ''', encoding="utf-8")
           print("ED ALL launcher icons generated from the supplied artwork.")
           PY
+
+      - name: Verify offline authorization and account isolation guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file="android-project/app/src/main/java/app/lovable/edall/MainActivity.java"
+          store_file="android-project/app/src/main/java/app/lovable/edall/OfflineMediaStore.java"
+          grep -Fq 'host.endsWith(".lovable.cloud")' "$source_file"
+          grep -Fq 'functions/v1/authorize-offline-download' "$source_file"
+          grep -Fq 'public static boolean delete(Context context, String id, String userId)' "$store_file"
+          grep -Fq 'if (!userId.equals(item.optString("userId"))) return false;' "$store_file"
+          grep -Fq 'metadata.userId' "$store_file" || grep -Fq 'userId.equals(metadata.optString("userId"))' "$store_file"
 
       - name: Verify Gradle Version
         run: gradle --version
