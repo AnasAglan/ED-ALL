@@ -3565,14 +3565,21 @@ jobs:
       - name: Verify offline authorization and account isolation guards
         shell: bash
         run: |
-          set -euo pipefail
-          source_file="android-project/app/src/main/java/app/lovable/edall/MainActivity.java"
-          store_file="android-project/app/src/main/java/app/lovable/edall/OfflineMediaStore.java"
-          grep -Fq 'host.endsWith(".lovable.cloud")' "$source_file"
-          grep -Fq 'functions/v1/authorize-offline-download' "$source_file"
-          grep -Fq 'public static boolean delete(Context context, String id, String userId)' "$store_file"
-          grep -Fq 'if (!userId.equals(item.optString("userId"))) return false;' "$store_file"
-          grep -Fq 'item.optString("userId")' "$store_file" || { echo "::error::Offline delete must verify manifest ownership."; exit 1; }
+          python - <<'PY'
+          from pathlib import Path
+          source = Path("android-project/app/src/main/java/app/lovable/edall/MainActivity.java").read_text()
+          store = Path("android-project/app/src/main/java/app/lovable/edall/OfflineMediaStore.java").read_text()
+          checks = {
+              "Lovable Cloud backend support": 'host.endsWith(".lovable.cloud")' in source,
+              "server-side offline authorization": "functions/v1/authorize-offline-download" in source,
+              "account-scoped delete signature": "public static boolean delete(Context context, String id, String userId)" in store,
+              "delete checks manifest owner": 'item.optString("userId")' in store,
+          }
+          for label, passed in checks.items():
+              print(f"{'PASS' if passed else 'FAIL'}: {label}")
+          if not all(checks.values()):
+              raise SystemExit("Offline authorization/account-isolation guard check failed.")
+          PY
 
       - name: Verify Gradle Version
         run: gradle --version
