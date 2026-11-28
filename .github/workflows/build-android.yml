@@ -361,7 +361,7 @@ jobs:
           import okhttp3.ResponseBody;
 
           public final class OfflineMediaStore {
-              private static final String KEY_ALIAS = "edall.offline.media.v1";
+              private static final String KEY_ALIAS = "edall.offline.media.v2";
               private static final byte[] MAGIC = "EDALL02".getBytes(StandardCharsets.US_ASCII);
               private static final int IV_LENGTH = 12;
               private static final int TAG_LENGTH = 16;
@@ -460,6 +460,7 @@ jobs:
                   File encryptedFile = new File(directory, id + ".edv");
                   File partialFile = new File(directory, id + ".partial");
                   File metadataFile = new File(directory, id + ".json");
+                  File metadataTemp = new File(directory, id + ".json.partial");
 
                   Request request = new Request.Builder()
                       .url(streamUrl)
@@ -503,10 +504,10 @@ jobs:
                               cipher.updateAAD(chunkAad(id, userId, chunkIndex, count));
                               byte[] sealed = cipher.doFinal(plainBuffer, 0, count);
                               byte[] iv = cipher.getIV();
-
                               output.writeInt(count);
                               output.write(iv);
                               output.write(sealed);
+                              Arrays.fill(iv, (byte) 0);
                               Arrays.fill(sealed, (byte) 0);
                               Arrays.fill(plainBuffer, 0, count, (byte) 0);
                               chunkIndex++;
@@ -555,7 +556,6 @@ jobs:
                       metadata.put("sizeBytes", written);
                       metadata.put("createdAt", System.currentTimeMillis());
                       metadata.put("format", "video-chunked-v2");
-                      File metadataTemp = new File(directory, id + ".json.partial");
                       try (FileOutputStream out = new FileOutputStream(metadataTemp)) {
                           out.write(metadata.toString().getBytes(StandardCharsets.UTF_8));
                           out.getFD().sync();
@@ -570,6 +570,7 @@ jobs:
                       partialFile.delete();
                       encryptedFile.delete();
                       metadataFile.delete();
+                      metadataTemp.delete();
                       throw error;
                   }
               }
@@ -892,7 +893,7 @@ jobs:
                       @Override
                       public void surfaceDestroyed(SurfaceHolder holder) {
                           surfaceHolder = null;
-                          releasePlayback();
+                          releaseMediaPlayerOnly();
                       }
                   });
 
@@ -906,7 +907,6 @@ jobs:
                                   return;
                               }
                               dataSource = opened;
-                              progress.setVisibility(View.GONE);
                               surfaceView.setVisibility(View.VISIBLE);
                               preparePlayerWhenReady();
                           });
@@ -937,6 +937,7 @@ jobs:
                               releasePlayback();
                               return;
                           }
+                          progress.setVisibility(View.GONE);
                           MediaController controls = new MediaController(this);
                           controls.setAnchorView(surfaceView);
                           controls.setMediaPlayer(new MediaController.MediaPlayerControl() {
@@ -974,13 +975,17 @@ jobs:
                   }
               }
 
-              private void releasePlayback() {
+              private void releaseMediaPlayerOnly() {
                   MediaPlayer player = mediaPlayer;
                   mediaPlayer = null;
                   if (player != null) {
                       try { player.setDisplay(null); } catch (Exception ignored) {}
                       try { player.release(); } catch (Exception ignored) {}
                   }
+              }
+
+              private void releasePlayback() {
+                  releaseMediaPlayerOnly();
                   OfflineMediaStore.EncryptedMediaDataSource source = dataSource;
                   dataSource = null;
                   if (source != null) {
@@ -992,6 +997,7 @@ jobs:
               protected void onStop() {
                   stopped = true;
                   releasePlayback();
+                  if (!isFinishing() && !isChangingConfigurations()) finish();
                   super.onStop();
               }
 
