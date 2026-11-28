@@ -2,6 +2,11 @@ name: Build & Sign Release APK (ED ALL)
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build-android.yml'
   push:
     branches:
       - main
@@ -210,6 +215,10 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+                  <activity
+                      android:name=".OfflinePlayerActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
               </application>
           </manifest>
           EOF
@@ -310,42 +319,742 @@ jobs:
           }
           EOF
 
-          # WebAppInterface لربط الجودات مع المنصة
-          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java
+          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/OfflineMediaStore.java
           package app.lovable.edall;
 
           import android.content.Context;
+          import android.media.MediaDataSource;
+          import android.os.StatFs;
+          import android.security.keystore.KeyGenParameterSpec;
+          import android.security.keystore.KeyProperties;
+
+          import org.json.JSONObject;
+
+          import java.io.BufferedInputStream;
+          import java.io.BufferedOutputStream;
+          import java.io.ByteArrayOutputStream;
+          import java.io.DataInputStream;
+          import java.io.DataOutputStream;
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.RandomAccessFile;
+          import java.nio.charset.StandardCharsets;
+          import java.security.KeyStore;
+          import java.util.ArrayList;
+          import java.util.Arrays;
+          import java.util.Collections;
+          import java.util.List;
+          import java.util.UUID;
+
+          import javax.crypto.AEADBadTagException;
+          import javax.crypto.Cipher;
+          import javax.crypto.KeyGenerator;
+          import javax.crypto.SecretKey;
+          import javax.crypto.spec.GCMParameterSpec;
+
+          import okhttp3.OkHttpClient;
+          import okhttp3.Request;
+          import okhttp3.Response;
+          import okhttp3.ResponseBody;
+
+          public final class OfflineMediaStore {
+              private static final String KEY_ALIAS = "edall.offline.media.v2";
+              private static final byte[] MAGIC = "EDALL02".getBytes(StandardCharsets.US_ASCII);
+              private static final int IV_LENGTH = 12;
+              private static final int TAG_LENGTH = 16;
+              private static final int TAG_BITS = 128;
+              private static final int CHUNK_SIZE = 1024 * 1024;
+              private static final int RECORD_PREFIX_BYTES = 4 + IV_LENGTH;
+              private static final long HEADER_BYTES = MAGIC.length + 4L + 8L + IV_LENGTH + TAG_LENGTH;
+              private static final long FULL_RECORD_BYTES = RECORD_PREFIX_BYTES + (long) CHUNK_SIZE + TAG_LENGTH;
+              private static final long MAX_DOWNLOAD_BYTES = 2L * 1024L * 1024L * 1024L;
+              private static final OkHttpClient HTTP = new OkHttpClient.Builder()
+                  .connectTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                  .readTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+                  .callTimeout(35, java.util.concurrent.TimeUnit.MINUTES)
+                  .followRedirects(true)
+                  .followSslRedirects(true)
+                  .build();
+
+              private OfflineMediaStore() {}
+
+              private static File root(Context context) throws Exception {
+                  File directory = new File(context.getNoBackupFilesDir(), "edall-offline-media");
+                  if (!directory.exists() && !directory.mkdirs()) {
+                      throw new Exception("Could not create private offline storage.");
+                  }
+                  return directory;
+              }
+
+              private static SecretKey encryptionKey() throws Exception {
+                  KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+                  store.load(null);
+                  if (!store.containsAlias(KEY_ALIAS)) {
+                      KeyGenerator generator = KeyGenerator.getInstance(
+                          KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+                      generator.init(new KeyGenParameterSpec.Builder(
+                          KEY_ALIAS,
+                          KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+                      )
+                          .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                          .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                          .setRandomizedEncryptionRequired(true)
+                          .build());
+                      generator.generateKey();
+                  }
+                  return (SecretKey) store.getKey(KEY_ALIAS, null);
+              }
+
+              private static byte[] headerAad(String id, String userId, long totalLength) {
+                  return (id + ":" + userId + ":header:" + CHUNK_SIZE + ":" + totalLength)
+                      .getBytes(StandardCharsets.UTF_8);
+              }
+
+              private static byte[] chunkAad(String id, String userId, long index, int length) {
+                  return (id + ":" + userId + ":" + index + ":" + length + ":" + CHUNK_SIZE)
+                      .getBytes(StandardCharsets.UTF_8);
+              }
+
+              private static int readChunk(InputStream input, byte[] buffer) throws IOException {
+                  int total = 0;
+                  while (total < buffer.length) {
+                      int count = input.read(buffer, total, buffer.length - total);
+                      if (count < 0) break;
+                      if (count == 0) continue;
+                      total += count;
+                  }
+                  return total;
+              }
+
+              public static JSONObject download(
+                  Context context,
+                  String userId,
+                  String videoId,
+                  String title,
+                  int height,
+                  String streamUrl
+              ) throws Exception {
+                  if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                      throw new Exception("تعذر ربط الفيديو بالحساب الحالي.");
+                  }
+                  if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}")) {
+                      throw new Exception("Invalid YouTube video ID.");
+                  }
+                  java.net.URL parsed = new java.net.URL(streamUrl);
+                  String host = parsed.getHost() == null ? "" : parsed.getHost().toLowerCase(java.util.Locale.ROOT);
+                  if (!"https".equalsIgnoreCase(parsed.getProtocol()) ||
+                      !(host.equals("googlevideo.com") || host.endsWith(".googlevideo.com"))) {
+                      throw new Exception("The selected media source is not an approved YouTube stream.");
+                  }
+
+                  File directory = root(context);
+                  StatFs stats = new StatFs(directory.getAbsolutePath());
+                  if (stats.getAvailableBytes() < 20L * 1024L * 1024L) {
+                      throw new Exception("Not enough free storage for an offline video.");
+                  }
+
+                  String id = UUID.randomUUID().toString();
+                  File encryptedFile = new File(directory, id + ".edv");
+                  File partialFile = new File(directory, id + ".partial");
+                  File metadataFile = new File(directory, id + ".json");
+                  File metadataTemp = new File(directory, id + ".json.partial");
+
+                  Request request = new Request.Builder()
+                      .url(streamUrl)
+                      .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 Chrome/128.0.0.0 Mobile Safari/537.36")
+                      .build();
+
+                  try (Response response = HTTP.newCall(request).execute()) {
+                      if (!response.isSuccessful()) {
+                          throw new Exception("YouTube stream download failed (HTTP " + response.code() + ").");
+                      }
+                      ResponseBody body = response.body();
+                      if (body == null) throw new Exception("The video stream was empty.");
+                      long expected = body.contentLength();
+                      if (expected > MAX_DOWNLOAD_BYTES) {
+                          throw new Exception("This video exceeds the 2 GB offline limit.");
+                      }
+
+                      SecretKey key = encryptionKey();
+                      long written = 0;
+                      long chunkIndex = 0;
+                      byte[] plainBuffer = new byte[CHUNK_SIZE];
+
+                      try (InputStream input = new BufferedInputStream(body.byteStream());
+                           FileOutputStream fileOutput = new FileOutputStream(partialFile);
+                           DataOutputStream output = new DataOutputStream(new BufferedOutputStream(fileOutput))) {
+                          output.write(MAGIC);
+                          output.writeInt(CHUNK_SIZE);
+                          output.writeLong(0L);
+                          output.write(new byte[IV_LENGTH + TAG_LENGTH]);
+
+                          int count;
+                          while ((count = readChunk(input, plainBuffer)) > 0) {
+                              written += count;
+                              if (written > MAX_DOWNLOAD_BYTES) {
+                                  Arrays.fill(plainBuffer, (byte) 0);
+                                  throw new Exception("This video exceeds the 2 GB offline limit.");
+                              }
+
+                              Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                              cipher.init(Cipher.ENCRYPT_MODE, key);
+                              cipher.updateAAD(chunkAad(id, userId, chunkIndex, count));
+                              byte[] sealed = cipher.doFinal(plainBuffer, 0, count);
+                              byte[] iv = cipher.getIV();
+                              output.writeInt(count);
+                              output.write(iv);
+                              output.write(sealed);
+                              Arrays.fill(iv, (byte) 0);
+                              Arrays.fill(sealed, (byte) 0);
+                              Arrays.fill(plainBuffer, 0, count, (byte) 0);
+                              chunkIndex++;
+                          }
+
+                          output.flush();
+                          fileOutput.getFD().sync();
+                      } finally {
+                          Arrays.fill(plainBuffer, (byte) 0);
+                      }
+
+                      if (written <= 0 || (expected > 0 && written != expected) ||
+                          !partialFile.isFile() || partialFile.length() <= HEADER_BYTES) {
+                          throw new Exception("The downloaded video is incomplete.");
+                      }
+
+                      // Authenticate the chunk geometry and full plaintext length in the header.
+                      try (RandomAccessFile header = new RandomAccessFile(partialFile, "rw")) {
+                          header.seek(MAGIC.length);
+                          header.writeInt(CHUNK_SIZE);
+                          header.writeLong(written);
+
+                          Cipher headerCipher = Cipher.getInstance("AES/GCM/NoPadding");
+                          headerCipher.init(Cipher.ENCRYPT_MODE, key);
+                          headerCipher.updateAAD(headerAad(id, userId, written));
+                          byte[] headerTag = headerCipher.doFinal(new byte[0]);
+                          if (headerTag.length != TAG_LENGTH) {
+                              throw new Exception("Could not authenticate offline video header.");
+                          }
+                          header.write(headerCipher.getIV());
+                          header.write(headerTag);
+                          header.getFD().sync();
+                          Arrays.fill(headerTag, (byte) 0);
+                      }
+
+                      if (!partialFile.renameTo(encryptedFile)) {
+                          throw new Exception("Could not finalize the encrypted video.");
+                      }
+
+                      JSONObject metadata = new JSONObject();
+                      metadata.put("id", id);
+                      metadata.put("userId", userId);
+                      metadata.put("videoId", videoId);
+                      metadata.put("title", title == null || title.trim().isEmpty() ? "ED-ALL video" : title.trim());
+                      metadata.put("height", height);
+                      metadata.put("sizeBytes", written);
+                      metadata.put("createdAt", System.currentTimeMillis());
+                      metadata.put("format", "video-chunked-v2");
+                      try (FileOutputStream out = new FileOutputStream(metadataTemp)) {
+                          out.write(metadata.toString().getBytes(StandardCharsets.UTF_8));
+                          out.getFD().sync();
+                      }
+                      if (!metadataTemp.renameTo(metadataFile)) {
+                          encryptedFile.delete();
+                          metadataTemp.delete();
+                          throw new Exception("Could not save offline video details.");
+                      }
+                      return metadata;
+                  } catch (Exception error) {
+                      partialFile.delete();
+                      encryptedFile.delete();
+                      metadataFile.delete();
+                      metadataTemp.delete();
+                      throw error;
+                  }
+              }
+
+              private static JSONObject readMetadata(File metadataFile) throws Exception {
+                  try (FileInputStream input = new FileInputStream(metadataFile);
+                       ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                      byte[] buffer = new byte[4096];
+                      int count;
+                      while ((count = input.read(buffer)) != -1) bytes.write(buffer, 0, count);
+                      return new JSONObject(bytes.toString("UTF-8"));
+                  }
+              }
+
+              public static List<JSONObject> list(Context context, String userId) throws Exception {
+                  if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                      throw new Exception("تعذر التحقق من الحساب الحالي.");
+                  }
+                  File directory = root(context);
+                  File[] files = directory.listFiles((dir, name) -> name.endsWith(".json"));
+                  List<JSONObject> items = new ArrayList<>();
+                  if (files == null) return items;
+                  for (File file : files) {
+                      try {
+                          JSONObject item = readMetadata(file);
+                          if (userId.equals(item.optString("userId"))) items.add(item);
+                      } catch (Exception invalid) {
+                          // Invalid metadata is ignored; the encrypted payload is never opened.
+                      }
+                  }
+                  Collections.sort(items, (a, b) -> Long.compare(
+                      b.optLong("createdAt", 0), a.optLong("createdAt", 0)));
+                  return items;
+              }
+
+              public static EncryptedMediaDataSource openEncryptedMedia(
+                  Context context,
+                  String id,
+                  String userId
+              ) throws Exception {
+                  if (id == null || !id.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}") ||
+                      userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                      throw new Exception("Invalid offline video identifier.");
+                  }
+                  File directory = root(context);
+                  File encryptedFile = new File(directory, id + ".edv");
+                  File metadataFile = new File(directory, id + ".json");
+                  if (!encryptedFile.isFile() || !metadataFile.isFile()) {
+                      throw new Exception("This offline video is no longer available.");
+                  }
+
+                  JSONObject metadata = readMetadata(metadataFile);
+                  if (!userId.equals(metadata.optString("userId"))) {
+                      throw new Exception("هذا الفيديو محفوظ لحساب آخر على الجهاز.");
+                  }
+                  if (!"video-chunked-v2".equals(metadata.optString("format"))) {
+                      throw new Exception("هذا الفيديو محفوظ بصيغة قديمة. احذفه وأعد تنزيله لتشغيله بأمان.");
+                  }
+                  return new EncryptedMediaDataSource(encryptedFile, id, userId);
+              }
+
+              public static final class EncryptedMediaDataSource extends MediaDataSource {
+                  private final RandomAccessFile file;
+                  private final String id;
+                  private final String userId;
+                  private final long totalLength;
+                  private final SecretKey key;
+                  private long cachedChunkIndex = -1;
+                  private byte[] cachedChunk;
+                  private boolean closed;
+
+                  private EncryptedMediaDataSource(File source, String id, String userId) throws Exception {
+                      this.id = id;
+                      this.userId = userId;
+                      this.key = encryptionKey();
+                      this.file = new RandomAccessFile(source, "r");
+                      long authenticatedLength;
+                      try {
+                          byte[] magic = new byte[MAGIC.length];
+                          file.readFully(magic);
+                          if (!Arrays.equals(magic, MAGIC)) {
+                              throw new IOException("Invalid encrypted video format.");
+                          }
+                          int chunkSize = file.readInt();
+                          authenticatedLength = file.readLong();
+                          byte[] headerIv = new byte[IV_LENGTH];
+                          byte[] headerTag = new byte[TAG_LENGTH];
+                          file.readFully(headerIv);
+                          file.readFully(headerTag);
+
+                          if (chunkSize != CHUNK_SIZE || authenticatedLength <= 0 ||
+                              authenticatedLength > MAX_DOWNLOAD_BYTES) {
+                              throw new IOException("Invalid encrypted video header.");
+                          }
+
+                          Cipher headerCipher = Cipher.getInstance("AES/GCM/NoPadding");
+                          headerCipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, headerIv));
+                          headerCipher.updateAAD(headerAad(id, userId, authenticatedLength));
+                          byte[] headerPlain = headerCipher.doFinal(headerTag);
+                          if (headerPlain.length != 0) {
+                              throw new IOException("Invalid encrypted video header.");
+                          }
+
+                          long chunkCount = (authenticatedLength + CHUNK_SIZE - 1L) / CHUNK_SIZE;
+                          long lastChunkLength = authenticatedLength - (chunkCount - 1L) * CHUNK_SIZE;
+                          long expectedFileLength = HEADER_BYTES +
+                              (chunkCount - 1L) * FULL_RECORD_BYTES +
+                              RECORD_PREFIX_BYTES + lastChunkLength + TAG_LENGTH;
+                          if (file.length() != expectedFileLength) {
+                              throw new IOException("Encrypted video file is truncated or has extra data.");
+                          }
+                          Arrays.fill(headerPlain, (byte) 0);
+                          Arrays.fill(headerIv, (byte) 0);
+                          Arrays.fill(headerTag, (byte) 0);
+                      } catch (Exception error) {
+                          try { file.close(); } catch (Exception ignored) {}
+                          throw error;
+                      }
+                      this.totalLength = authenticatedLength;
+                  }
+
+                  @Override
+                  public synchronized int readAt(long position, byte[] buffer, int offset, int size) throws IOException {
+                      if (closed) throw new IOException("Offline video source is closed.");
+                      if (buffer == null || offset < 0 || size < 0 || offset > buffer.length - size) {
+                          throw new IOException("Invalid media read request.");
+                      }
+                      if (size == 0) return 0;
+                      if (position < 0) throw new IOException("Invalid media position.");
+                      if (position >= totalLength) return -1;
+
+                      int wanted = (int) Math.min((long) size, totalLength - position);
+                      int copied = 0;
+                      long cursor = position;
+                      while (copied < wanted) {
+                          long chunkIndex = cursor / CHUNK_SIZE;
+                          int withinChunk = (int) (cursor % CHUNK_SIZE);
+                          byte[] plain = loadChunk(chunkIndex);
+                          int count = Math.min(wanted - copied, plain.length - withinChunk);
+                          if (count <= 0) throw new IOException("Invalid encrypted video chunk boundary.");
+                          System.arraycopy(plain, withinChunk, buffer, offset + copied, count);
+                          copied += count;
+                          cursor += count;
+                      }
+                      return copied;
+                  }
+
+                  private byte[] loadChunk(long chunkIndex) throws IOException {
+                      if (cachedChunkIndex == chunkIndex && cachedChunk != null) return cachedChunk;
+                      if (cachedChunk != null) {
+                          Arrays.fill(cachedChunk, (byte) 0);
+                          cachedChunk = null;
+                          cachedChunkIndex = -1;
+                      }
+
+                      long chunkStart = chunkIndex * CHUNK_SIZE;
+                      if (chunkIndex < 0 || chunkStart >= totalLength) {
+                          throw new IOException("Offline video chunk is outside the file.");
+                      }
+                      int expectedLength = (int) Math.min((long) CHUNK_SIZE, totalLength - chunkStart);
+                      long recordOffset = HEADER_BYTES + chunkIndex * FULL_RECORD_BYTES;
+                      try {
+                          file.seek(recordOffset);
+                          int storedLength = file.readInt();
+                          if (storedLength != expectedLength) {
+                              throw new IOException("Encrypted video chunk length is invalid.");
+                          }
+
+                          byte[] iv = new byte[IV_LENGTH];
+                          byte[] sealed = new byte[storedLength + TAG_LENGTH];
+                          file.readFully(iv);
+                          file.readFully(sealed);
+
+                          Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                          cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, iv));
+                          cipher.updateAAD(chunkAad(id, userId, chunkIndex, storedLength));
+                          byte[] plain = cipher.doFinal(sealed);
+                          Arrays.fill(iv, (byte) 0);
+                          Arrays.fill(sealed, (byte) 0);
+                          if (plain.length != storedLength) {
+                              Arrays.fill(plain, (byte) 0);
+                              throw new IOException("Authenticated video chunk has an invalid size.");
+                          }
+                          cachedChunk = plain;
+                          cachedChunkIndex = chunkIndex;
+                          return cachedChunk;
+                      } catch (AEADBadTagException invalidTag) {
+                          throw new IOException("Offline video integrity verification failed.", invalidTag);
+                      } catch (IOException error) {
+                          throw error;
+                      } catch (Exception error) {
+                          throw new IOException("Could not decrypt the requested offline video chunk.", error);
+                      }
+                  }
+
+                  @Override
+                  public synchronized long getSize() throws IOException {
+                      if (closed) throw new IOException("Offline video source is closed.");
+                      return totalLength;
+                  }
+
+                  @Override
+                  public synchronized void close() throws IOException {
+                      if (closed) return;
+                      closed = true;
+                      if (cachedChunk != null) {
+                          Arrays.fill(cachedChunk, (byte) 0);
+                          cachedChunk = null;
+                          cachedChunkIndex = -1;
+                      }
+                      file.close();
+                  }
+              }
+
+              public static boolean delete(Context context, String id, String userId) throws Exception {
+                  if (id == null || !id.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}") ||
+                      userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) return false;
+                  File directory = root(context);
+                  File media = new File(directory, id + ".edv");
+                  File metadata = new File(directory, id + ".json");
+                  if (!metadata.isFile()) return false;
+                  JSONObject item = readMetadata(metadata);
+                  if (!userId.equals(item.optString("userId"))) return false;
+                  boolean a = !media.exists() || media.delete();
+                  boolean b = metadata.delete();
+                  return a && b;
+              }
+
+              public static void cleanupPlaybackCache(Context context) {
+                  // Remove plaintext cache files created by older app builds on a previous launch.
+                  File[] files = context.getCacheDir().listFiles((dir, name) ->
+                      name.startsWith("edall-offline-playback-"));
+                  if (files != null) for (File file : files) file.delete();
+              }
+          }
+
+          EOF
+
+          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/OfflinePlayerActivity.java
+          package app.lovable.edall;
+
+          import android.graphics.Color;
+          import android.media.MediaPlayer;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.SurfaceHolder;
+          import android.view.SurfaceView;
+          import android.view.View;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.MediaController;
+          import android.widget.ProgressBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class OfflinePlayerActivity extends AppCompatActivity {
+              private final Handler mainHandler = new Handler(Looper.getMainLooper());
+              private OfflineMediaStore.EncryptedMediaDataSource dataSource;
+              private MediaPlayer mediaPlayer;
+              private SurfaceHolder surfaceHolder;
+              private SurfaceView surfaceView;
+              private ProgressBar progress;
+              private volatile boolean stopped;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setFlags(
+                      android.view.WindowManager.LayoutParams.FLAG_SECURE,
+                      android.view.WindowManager.LayoutParams.FLAG_SECURE
+                  );
+
+                  String id = getIntent().getStringExtra("offline_video_id");
+                  String userId = getIntent().getStringExtra("offline_user_id");
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setBackgroundColor(Color.BLACK);
+
+                  TextView title = new TextView(this);
+                  title.setText("تشغيل فيديو محفوظ");
+                  title.setTextColor(Color.WHITE);
+                  title.setGravity(Gravity.CENTER);
+                  title.setPadding(16, 14, 16, 14);
+                  root.addView(title, new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+                  FrameLayout stage = new FrameLayout(this);
+                  root.addView(stage, new LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  surfaceView = new SurfaceView(this);
+                  surfaceView.setVisibility(View.INVISIBLE);
+                  stage.addView(surfaceView, new FrameLayout.LayoutParams(
+                      FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  progress = new ProgressBar(this);
+                  FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(
+                      FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+                  stage.addView(progress, progressParams);
+                  setContentView(root);
+
+                  surfaceHolder = surfaceView.getHolder();
+                  surfaceHolder.addCallback(new SurfaceHolder.Callback() {
+                      @Override
+                      public void surfaceCreated(SurfaceHolder holder) {
+                          surfaceHolder = holder;
+                          preparePlayerWhenReady();
+                      }
+
+                      @Override
+                      public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                          surfaceHolder = holder;
+                          preparePlayerWhenReady();
+                      }
+
+                      @Override
+                      public void surfaceDestroyed(SurfaceHolder holder) {
+                          surfaceHolder = null;
+                          releaseMediaPlayerOnly();
+                      }
+                  });
+
+                  new Thread(() -> {
+                      try {
+                          OfflineMediaStore.EncryptedMediaDataSource opened =
+                              OfflineMediaStore.openEncryptedMedia(this, id, userId);
+                          mainHandler.post(() -> {
+                              if (stopped || isFinishing() || isDestroyed()) {
+                                  try { opened.close(); } catch (Exception ignored) {}
+                                  return;
+                              }
+                              dataSource = opened;
+                              surfaceView.setVisibility(View.VISIBLE);
+                              preparePlayerWhenReady();
+                          });
+                      } catch (Exception error) {
+                          mainHandler.post(() -> {
+                              if (stopped || isFinishing() || isDestroyed()) return;
+                              Toast.makeText(this,
+                                  error.getMessage() == null
+                                      ? "تعذر فتح الفيديو المشفر أو التحقق من سلامته."
+                                      : error.getMessage(),
+                                  Toast.LENGTH_LONG).show();
+                              finish();
+                          });
+                      }
+                  }, "edall-offline-open").start();
+              }
+
+              private void preparePlayerWhenReady() {
+                  if (stopped || mediaPlayer != null || dataSource == null ||
+                      surfaceHolder == null || !surfaceHolder.getSurface().isValid()) {
+                      return;
+                  }
+                  MediaPlayer player = new MediaPlayer();
+                  mediaPlayer = player;
+                  try {
+                      player.setOnPreparedListener(prepared -> {
+                          if (stopped || isFinishing()) {
+                              releasePlayback();
+                              return;
+                          }
+                          progress.setVisibility(View.GONE);
+                          MediaController controls = new MediaController(this);
+                          controls.setAnchorView(surfaceView);
+                          controls.setMediaPlayer(new MediaController.MediaPlayerControl() {
+                              @Override public void start() { if (mediaPlayer != null) mediaPlayer.start(); }
+                              @Override public void pause() { if (mediaPlayer != null && mediaPlayer.isPlaying()) mediaPlayer.pause(); }
+                              @Override public int getDuration() { return mediaPlayer == null ? 0 : mediaPlayer.getDuration(); }
+                              @Override public int getCurrentPosition() { return mediaPlayer == null ? 0 : mediaPlayer.getCurrentPosition(); }
+                              @Override public void seekTo(int position) { if (mediaPlayer != null) mediaPlayer.seekTo(position); }
+                              @Override public boolean isPlaying() { return mediaPlayer != null && mediaPlayer.isPlaying(); }
+                              @Override public int getBufferPercentage() { return 0; }
+                              @Override public boolean canPause() { return true; }
+                              @Override public boolean canSeekBackward() { return true; }
+                              @Override public boolean canSeekForward() { return true; }
+                              @Override public int getAudioSessionId() { return mediaPlayer == null ? 0 : mediaPlayer.getAudioSessionId(); }
+                          });
+                          controls.setEnabled(true);
+                          controls.show(3000);
+                          prepared.start();
+                      });
+                      player.setOnCompletionListener(done -> finish());
+                      player.setOnErrorListener((failed, what, extra) -> {
+                          Toast.makeText(this, "تعذر تشغيل الفيديو المحفوظ أو التحقق من سلامته.", Toast.LENGTH_LONG).show();
+                          finish();
+                          return true;
+                      });
+                      player.setDisplay(surfaceHolder);
+                      player.setDataSource(dataSource);
+                      player.setScreenOnWhilePlaying(true);
+                      player.prepareAsync();
+                  } catch (Exception error) {
+                      Toast.makeText(this,
+                          error.getMessage() == null ? "تعذر بدء تشغيل الفيديو المشفر." : error.getMessage(),
+                          Toast.LENGTH_LONG).show();
+                      finish();
+                  }
+              }
+
+              private void releaseMediaPlayerOnly() {
+                  MediaPlayer player = mediaPlayer;
+                  mediaPlayer = null;
+                  if (player != null) {
+                      try { player.setDisplay(null); } catch (Exception ignored) {}
+                      try { player.release(); } catch (Exception ignored) {}
+                  }
+              }
+
+              private void releasePlayback() {
+                  releaseMediaPlayerOnly();
+                  OfflineMediaStore.EncryptedMediaDataSource source = dataSource;
+                  dataSource = null;
+                  if (source != null) {
+                      try { source.close(); } catch (Exception ignored) {}
+                  }
+              }
+
+              @Override
+              protected void onStop() {
+                  stopped = true;
+                  releasePlayback();
+                  if (!isFinishing() && !isChangingConfigurations()) finish();
+                  super.onStop();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  stopped = true;
+                  releasePlayback();
+                  super.onDestroy();
+              }
+          }
+
+          EOF
+
+
+          # WebAppInterface لربط الجودات مع المنصة
+          cat << 'EOF' > android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java
+          package app.lovable.edall;
+          
+          import android.content.Context;
+          import android.content.Intent;
+          import android.net.Uri;
           import android.os.Handler;
           import android.os.Looper;
           import android.webkit.JavascriptInterface;
           import android.webkit.WebView;
-
+          import android.widget.Toast;
+          
+          import androidx.appcompat.app.AlertDialog;
+          
           import org.json.JSONArray;
           import org.json.JSONObject;
           import org.schabi.newpipe.extractor.ServiceList;
           import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor;
           import org.schabi.newpipe.extractor.stream.AudioStream;
-          import org.schabi.newpipe.extractor.stream.StreamInfo;
           import org.schabi.newpipe.extractor.stream.VideoStream;
-
+          
+          import java.nio.charset.StandardCharsets;
           import java.util.*;
           import java.util.concurrent.ConcurrentHashMap;
           import java.util.concurrent.ExecutorService;
           import java.util.concurrent.Executors;
-
+          import java.util.concurrent.atomic.AtomicBoolean;
+          
           public class WebAppInterface {
               private final Context context;
               private final WebView webView;
               private final Handler mainHandler = new Handler(Looper.getMainLooper());
               private final ExecutorService executor = Executors.newFixedThreadPool(3);
               private final Map<String, String> cache = new ConcurrentHashMap<>();
-
+              private final Map<String, Long> cacheExpiresAt = new ConcurrentHashMap<>();
+              private final AtomicBoolean downloadInProgress = new AtomicBoolean(false);
+          
               public WebAppInterface(Context context, WebView webView) {
                   this.context = context;
                   this.webView = webView;
               }
-
-              // Retry inside this WebView. Do not route the retry button to an external browser.
+          
               @JavascriptInterface
               public void retryLoading() {
                   mainHandler.post(() -> {
@@ -355,102 +1064,367 @@ jobs:
                       }
                   });
               }
-
+          
               @JavascriptInterface
-              public void fetchYoutubeFormats(final String videoId, final String callbackId) {
-                  if (videoId == null || videoId.length() < 11) {
-                      sendResult(callbackId, "{\"error\":\"Invalid Video ID\",\"fallback\":true}");
+              public void fetchYoutubeFormats(final String videoId, final String callbackId, final boolean force) {
+                  if (videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}") ||
+                      callbackId == null || !callbackId.matches("cb_[A-Za-z0-9_-]{1,60}")) {
+                      JSONObject error = new JSONObject();
+                      try { error.put("error", "Invalid YouTube video ID or callback."); error.put("fallback", true); }
+                      catch (Exception ignored) {}
+                      sendResult(callbackId, error.toString());
                       return;
                   }
-
-                  if (cache.containsKey(videoId)) {
+          
+                  long now = System.currentTimeMillis();
+                  Long cachedUntil = cacheExpiresAt.get(videoId);
+                  if (!force && cache.containsKey(videoId) && cachedUntil != null && cachedUntil > now + 120000L) {
                       sendResult(callbackId, cache.get(videoId));
                       return;
                   }
-
+                  cache.remove(videoId);
+                  cacheExpiresAt.remove(videoId);
+          
                   executor.execute(() -> {
                       try {
-                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube.getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
+                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube
+                              .getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
                           extractor.fetchPage();
-
+          
                           String title = extractor.getName();
                           List<VideoStream> videoStreams = extractor.getVideoStreams();
                           List<VideoStream> videoOnlyStreams = extractor.getVideoOnlyStreams();
                           List<AudioStream> audioStreams = extractor.getAudioStreams();
-
+          
                           AudioStream bestAudio = null;
                           int maxAbr = -1;
-                          for (AudioStream as : audioStreams) {
-                              if (as.getAverageBitrate() > maxAbr) {
-                                  maxAbr = as.getAverageBitrate();
-                                  bestAudio = as;
+                          for (AudioStream stream : audioStreams) {
+                              if (stream.getAverageBitrate() > maxAbr) {
+                                  maxAbr = stream.getAverageBitrate();
+                                  bestAudio = stream;
                               }
                           }
-
+          
                           Map<Integer, VideoStream> formatMap = new TreeMap<>(Collections.reverseOrder());
-                          for (VideoStream vs : videoStreams) {
-                              int h = vs.getHeight();
-                              if (h >= 144 && (!formatMap.containsKey(h) || vs.getBitrate() > formatMap.get(h).getBitrate())) {
-                                  formatMap.put(h, vs);
+                          for (VideoStream stream : videoStreams) {
+                              int height = stream.getHeight();
+                              if (height >= 144 && (!formatMap.containsKey(height) ||
+                                  stream.getBitrate() > formatMap.get(height).getBitrate())) {
+                                  formatMap.put(height, stream);
                               }
                           }
-
+          
                           if (bestAudio != null) {
-                              for (VideoStream vs : videoOnlyStreams) {
-                                  int h = vs.getHeight();
-                                  if (h >= 144 && !formatMap.containsKey(h)) {
-                                      formatMap.put(h, vs);
-                                  }
+                              for (VideoStream stream : videoOnlyStreams) {
+                                  int height = stream.getHeight();
+                                  if (height >= 144 && !formatMap.containsKey(height)) formatMap.put(height, stream);
                               }
                           }
-
+          
                           if (formatMap.isEmpty()) {
-                              sendResult(callbackId, "{\"error\":\"No playable streams\",\"fallback\":true}");
+                              JSONObject error = new JSONObject();
+                              error.put("error", "No playable streams");
+                              error.put("fallback", true);
+                              sendResult(callbackId, error.toString());
                               return;
                           }
-
+          
                           JSONObject result = new JSONObject();
                           result.put("title", title != null ? title : "Video");
                           result.put("fallback", false);
-
                           if (bestAudio != null) {
-                              JSONObject audioObj = new JSONObject();
-                              audioObj.put("url", bestAudio.getUrl());
-                              audioObj.put("expire", System.currentTimeMillis() + 3600000L);
-                              result.put("audio", audioObj);
+                              JSONObject audio = new JSONObject();
+                              audio.put("url", bestAudio.getUrl());
+                              audio.put("expire", System.currentTimeMillis() + 3600000L);
+                              result.put("audio", audio);
                           } else {
                               result.put("audio", JSONObject.NULL);
                           }
-
-                          JSONArray videosArr = new JSONArray();
+          
+                          JSONArray videos = new JSONArray();
                           for (Map.Entry<Integer, VideoStream> entry : formatMap.entrySet()) {
-                              VideoStream vs = entry.getValue();
-                              JSONObject vObj = new JSONObject();
-                              vObj.put("h", entry.getKey());
-                              vObj.put("url", vs.getUrl());
-                              vObj.put("hasAudio", vs.isVideoOnly() ? false : true);
-                              vObj.put("expire", System.currentTimeMillis() + 3600000L);
-                              videosArr.put(vObj);
+                              VideoStream stream = entry.getValue();
+                              JSONObject video = new JSONObject();
+                              video.put("h", entry.getKey());
+                              video.put("url", stream.getUrl());
+                              video.put("hasAudio", !stream.isVideoOnly());
+                              video.put("expire", System.currentTimeMillis() + 3600000L);
+                              videos.put(video);
                           }
-                          result.put("videos", videosArr);
-
-                          String jsonString = result.toString();
-                          cache.put(videoId, jsonString);
-                          sendResult(callbackId, jsonString);
-
-                      } catch (Exception e) {
-                          sendResult(callbackId, "{\"error\":\"" + e.getMessage() + "\",\"fallback\":true}");
+                          result.put("videos", videos);
+                          String json = result.toString();
+                          cache.put(videoId, json);
+                          cacheExpiresAt.put(videoId, System.currentTimeMillis() + 45 * 60 * 1000L);
+                          sendResult(callbackId, json);
+                      } catch (Exception error) {
+                          JSONObject result = new JSONObject();
+                          try {
+                              result.put("error", "YouTube extraction failed.");
+                              result.put("fallback", true);
+                          } catch (Exception ignored) {}
+                          sendResult(callbackId, result.toString());
                       }
                   });
               }
+          
+              private String authorizeOfflineDownload(
+                  String supabaseUrl,
+                  String publishableKey,
+                  String accessToken,
+                  String courseId,
+                  String lessonId,
+                  String videoId
+              ) throws Exception {
+                  Uri base = Uri.parse(supabaseUrl == null ? "" : supabaseUrl);
+                  String host = base.getHost() == null ? "" : base.getHost().toLowerCase(Locale.ROOT);
+                  if (!"https".equalsIgnoreCase(base.getScheme()) ||
+                      !(host.endsWith(".supabase.co") || host.endsWith(".lovable.cloud")) ||
+                      base.getUserInfo() != null || base.getPort() != -1 ||
+                      (base.getPath() != null && !base.getPath().isEmpty() && !"/".equals(base.getPath())) ||
+                      base.getQuery() != null || base.getFragment() != null ||
+                      publishableKey == null || publishableKey.trim().isEmpty() ||
+                      accessToken == null || accessToken.length() < 40) {
+                      throw new Exception("تعذر التحقق من جلسة المنصة.");
+                  }
+          
+                  JSONObject payload = new JSONObject();
+                  payload.put("course_id", courseId);
+                  payload.put("lesson_id", lessonId);
+                  payload.put("video_id", videoId);
+                  okhttp3.RequestBody body = okhttp3.RequestBody.create(
+                      payload.toString(),
+                      okhttp3.MediaType.parse("application/json; charset=utf-8")
+                  );
+                  okhttp3.Request request = new okhttp3.Request.Builder()
+                      .url(supabaseUrl.replaceAll("/+$", "") + "/functions/v1/authorize-offline-download")
+                      .header("Authorization", "Bearer " + accessToken)
+                      .header("Origin", "https://edall.lovable.app")
+                      .header("apikey", publishableKey)
+                      .header("Accept", "application/json")
+                      .post(body)
+                      .build();
+          
+                  okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
+                      .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                      .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                      .callTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                      .build();
+                  try (okhttp3.Response response = client.newCall(request).execute()) {
+                      String raw = response.body() == null ? "{}" : response.body().string();
+                      JSONObject result = new JSONObject(raw);
+                      if (!response.isSuccessful() || !result.optBoolean("authorized", false)) return null;
+                      String authorizedUserId = result.optString("user_id", "");
+                      if (!authorizedUserId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                          throw new Exception("الخادم لم يُرجع هوية الحساب المصرّح له.");
+                      }
+                      return authorizedUserId;
+                  }
+              }
+          
+              @JavascriptInterface
+              public void downloadYoutubeVideo(
+                  String videoId,
+                  int quality,
+                  String courseId,
+                  String lessonId,
+                  String accessToken,
+                  String supabaseUrl,
+                  String publishableKey,
+                  String callbackId
+              ) {
+                  if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}") ||
+                      videoId == null || !videoId.matches("[A-Za-z0-9_-]{11}") ||
+                      courseId == null || !courseId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}") ||
+                      lessonId == null || !lessonId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                      JSONObject error = new JSONObject();
+                      try { error.put("success", false); error.put("error", "طلب تنزيل غير صالح."); }
+                      catch (Exception ignored) {}
+                      sendOfflineResult(callbackId, error.toString());
+                      return;
+                  }
+                  if (!downloadInProgress.compareAndSet(false, true)) {
+                      JSONObject error = new JSONObject();
+                      try { error.put("success", false); error.put("error", "يوجد تنزيل آخر قيد التنفيذ."); }
+                      catch (Exception ignored) {}
+                      sendOfflineResult(callbackId, error.toString());
+                      return;
+                  }
+          
+                  executor.execute(() -> {
+                      try {
+                          String authorizedUserId = authorizeOfflineDownload(supabaseUrl, publishableKey, accessToken, courseId, lessonId, videoId);
+                          if (authorizedUserId == null) {
+                              throw new Exception("هذا الفيديو غير متاح للتنزيل لهذا الحساب أو المحاضرة.");
+                          }
+          
+                          YoutubeStreamExtractor extractor = (YoutubeStreamExtractor) ServiceList.YouTube
+                              .getStreamExtractor("https://www.youtube.com/watch?v=" + videoId);
+                          extractor.fetchPage();
+                          List<VideoStream> muxed = extractor.getVideoStreams();
+                          if (muxed == null || muxed.isEmpty()) {
+                              throw new Exception("لا يوجد إصدار مناسب للتنزيل دون اتصال.");
+                          }
+          
+                          int target = Math.max(144, Math.min(2160, quality <= 0 ? 720 : quality));
+                          VideoStream selected = null;
+                          VideoStream lowest = null;
+                          for (VideoStream stream : muxed) {
+                              int height = stream.getHeight();
+                              if (height < 144 || stream.isVideoOnly() || stream.getUrl() == null) continue;
+                              if (lowest == null || height < lowest.getHeight()) lowest = stream;
+                              if (height <= target && (selected == null || height > selected.getHeight())) selected = stream;
+                          }
+                          if (selected == null) selected = lowest;
+                          if (selected == null) {
+                              throw new Exception("لم يعثر NewPipe على فيديو يحتوي على الصوت.");
+                          }
+          
+                          JSONObject saved = OfflineMediaStore.download(
+                              context, authorizedUserId, videoId, extractor.getName(), selected.getHeight(), selected.getUrl());
+                          saved.put("success", true);
+                          saved.put("message", "تم حفظ الفيديو مشفراً داخل التطبيق.");
+                          sendOfflineResult(callbackId, saved.toString());
+                      } catch (Exception error) {
+                          JSONObject result = new JSONObject();
+                          try {
+                              result.put("success", false);
+                              result.put("error", error.getMessage() == null ? "تعذر تنزيل الفيديو." : error.getMessage());
+                          } catch (Exception ignored) {}
+                          sendOfflineResult(callbackId, result.toString());
+                      } finally {
+                          downloadInProgress.set(false);
+                      }
+                  });
+              }
+          
+              private String verifySupabaseSessionUser(
+                  String supabaseUrl,
+                  String publishableKey,
+                  String accessToken
+              ) throws Exception {
+                  Uri base = Uri.parse(supabaseUrl == null ? "" : supabaseUrl);
+                  String host = base.getHost() == null ? "" : base.getHost().toLowerCase(Locale.ROOT);
+                  if (!"https".equalsIgnoreCase(base.getScheme()) ||
+                      !(host.endsWith(".supabase.co") || host.endsWith(".lovable.cloud")) ||
+                      base.getUserInfo() != null || base.getPort() != -1 ||
+                      (base.getPath() != null && !base.getPath().isEmpty() && !"/".equals(base.getPath())) ||
+                      base.getQuery() != null || base.getFragment() != null ||
+                      publishableKey == null || publishableKey.trim().isEmpty() ||
+                      accessToken == null || accessToken.length() < 40) {
+                      throw new Exception("تعذر التحقق من جلسة المنصة.");
+                  }
+                  okhttp3.Request request = new okhttp3.Request.Builder()
+                      .url(supabaseUrl.replaceAll("/+$", "") + "/auth/v1/user")
+                      .header("Authorization", "Bearer " + accessToken)
+                      .header("apikey", publishableKey)
+                      .header("Accept", "application/json")
+                      .get()
+                      .build();
+                  okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
+                      .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                      .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                      .callTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                      .build();
+                  try (okhttp3.Response response = client.newCall(request).execute()) {
+                      String raw = response.body() == null ? "{}" : response.body().string();
+                      if (!response.isSuccessful()) throw new Exception("انتهت جلسة المنصة أو لم تعد صالحة.");
+                      JSONObject profile = new JSONObject(raw);
+                      String verifiedUserId = profile.optString("id", "");
+                      if (!verifiedUserId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                          throw new Exception("لم يؤكد الخادم هوية الحساب الحالي.");
+                      }
+                      return verifiedUserId;
+                  }
+              }
 
-              private void sendResult(final String callbackId, final String jsonResult) {
+              @JavascriptInterface
+              public void openOfflineLibrary(
+                  final String userId,
+                  final String accessToken,
+                  final String supabaseUrl,
+                  final String publishableKey
+              ) {
+                  if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                      mainHandler.post(() -> Toast.makeText(context, "سجّل الدخول لعرض فيديوهات هذا الحساب.", Toast.LENGTH_LONG).show());
+                      return;
+                  }
+                  executor.execute(() -> {
+                      try {
+                          String verifiedUserId = verifySupabaseSessionUser(supabaseUrl, publishableKey, accessToken);
+                          if (!verifiedUserId.equalsIgnoreCase(userId)) {
+                              throw new Exception("لا يمكن فتح مكتبة حساب مختلف عن الحساب المسجل حالياً.");
+                          }
+                          List<JSONObject> items = OfflineMediaStore.list(context, verifiedUserId);
+                          mainHandler.post(() -> {
+                              try {
+                                  if (items.isEmpty()) {
+                                      Toast.makeText(context, "لا توجد فيديوهات محفوظة بعد.", Toast.LENGTH_LONG).show();
+                                      return;
+                                  }
+                                  String[] labels = new String[items.size()];
+                                  for (int i = 0; i < items.size(); i++) {
+                                      JSONObject item = items.get(i);
+                                      labels[i] = item.optString("title", "ED-ALL video") + " — " +
+                                          item.optInt("height", 0) + "p";
+                                  }
+                                  new AlertDialog.Builder(context)
+                                      .setTitle("الفيديوهات المحفوظة")
+                                      .setItems(labels, (dialog, index) -> {
+                                          JSONObject item = items.get(index);
+                                          String id = item.optString("id");
+                                          new AlertDialog.Builder(context)
+                                              .setTitle(item.optString("title", "ED-ALL video"))
+                                              .setItems(new String[]{"تشغيل", "حذف من الجهاز"}, (inner, action) -> {
+                                                  if (action == 0) {
+                                                      Intent intent = new Intent(context, OfflinePlayerActivity.class);
+                                                      intent.putExtra("offline_video_id", id);
+                                                      intent.putExtra("offline_user_id", verifiedUserId);
+                                                      context.startActivity(intent);
+                                                  } else {
+                                                      try {
+                                                          OfflineMediaStore.delete(context, id, verifiedUserId);
+                                                          Toast.makeText(context, "تم حذف الفيديو المحفوظ.", Toast.LENGTH_SHORT).show();
+                                                      } catch (Exception error) {
+                                                          Toast.makeText(context, "تعذر حذف الفيديو.", Toast.LENGTH_LONG).show();
+                                                      }
+                                                  }
+                                              })
+                                              .setNegativeButton("إغلاق", null)
+                                              .show();
+                                      })
+                                      .setNegativeButton("إغلاق", null)
+                                      .show();
+                              } catch (Exception error) {
+                                  Toast.makeText(context, "تعذر فتح مكتبة الفيديوهات.", Toast.LENGTH_LONG).show();
+                              }
+                          });
+                      } catch (Exception error) {
+                          mainHandler.post(() -> Toast.makeText(context,
+                              error.getMessage() == null ? "تعذر التحقق من الحساب الحالي." : error.getMessage(),
+                              Toast.LENGTH_LONG).show());
+                      }
+                  });
+              }
+          
+              private void sendOfflineResult(final String callbackId, final String jsonResult) {
+                  if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}")) return;
                   mainHandler.post(() -> {
-                      String safeJson = jsonResult.replace("'", "\\'");
-                      webView.evaluateJavascript("window.__edResolveFormat && window.__edResolveFormat('" + callbackId + "', '" + safeJson + "');", null);
+                      String script = "window.__edResolveOffline && window.__edResolveOffline(" +
+                          JSONObject.quote(callbackId) + "," + JSONObject.quote(jsonResult) + ");";
+                      webView.evaluateJavascript(script, null);
+                  });
+              }
+          
+              private void sendResult(final String callbackId, final String jsonResult) {
+                  if (callbackId == null || !callbackId.matches("[A-Za-z0-9_:-]{1,80}")) return;
+                  mainHandler.post(() -> {
+                      String script = "window.__edResolveFormat && window.__edResolveFormat(" +
+                          JSONObject.quote(callbackId) + "," + JSONObject.quote(jsonResult) + ");";
+                      webView.evaluateJavascript(script, null);
                   });
               }
           }
+          
           EOF
 
           # MainActivity تدعم شاشة انقطاع النت وفتح PDF في المتصفح وتفريغ الكاش
@@ -492,6 +1466,12 @@ jobs:
                   "      delete window.__edCallbacks[id];" +
                   "    }" +
                   "  };" +
+                  "  window.__edOfflineCallbacks = {};" +
+                  "  window.__edResolveOffline = function(id, raw) {" +
+                  "    var fn = window.__edOfflineCallbacks[id]; if (!fn) return;" +
+                  "    try { fn(JSON.parse(raw)); } catch(e) { fn({success:false,error:'Invalid native response'}); }" +
+                  "    delete window.__edOfflineCallbacks[id];" +
+                  "  };" +
                   "  window.edallDesktop = {" +
                   "    isDesktop: true," +
                   "    isAndroid: true," +
@@ -507,11 +1487,23 @@ jobs:
                   "          }" +
                   "        };" +
                   "        if (window.AndroidBridge && window.AndroidBridge.fetchYoutubeFormats) {" +
-                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId);" +
+                  "          window.AndroidBridge.fetchYoutubeFormats(videoId, cbId, force === true);" +
                   "        } else {" +
                   "          resolve({ fallback: true });" +
                   "        }" +
                   "      });" +
+                  "    }," +
+                  "    downloadOfflineVideo: function(videoId, quality, courseId, lessonId, accessToken, supabaseUrl, publishableKey) {" +
+                  "      return new Promise(function(resolve) {" +
+                  "        var cbId = 'off_' + Date.now() + '_' + Math.random().toString(36).substr(2, 7);" +
+                  "        window.__edOfflineCallbacks[cbId] = resolve;" +
+                  "        if (window.AndroidBridge && window.AndroidBridge.downloadYoutubeVideo) {" +
+                  "          window.AndroidBridge.downloadYoutubeVideo(videoId, Number(quality)||720, courseId, lessonId, accessToken, supabaseUrl, publishableKey, cbId);" +
+                  "        } else { resolve({success:false,error:'Android download bridge unavailable'}); }" +
+                  "      });" +
+                  "    }," +
+                  "    openOfflineLibrary: function(userId, accessToken, supabaseUrl, publishableKey) {" +
+                  "      if (window.AndroidBridge && window.AndroidBridge.openOfflineLibrary) window.AndroidBridge.openOfflineLibrary(userId || '', accessToken || '', supabaseUrl || '', publishableKey || '');" +
                   "    }," +
                   "    setVideoFullscreen: function(enabled) { return Promise.resolve(true); }" +
                   "  };" +
@@ -524,6 +1516,7 @@ jobs:
                   super.onCreate(savedInstanceState);
                   getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
 
+                  OfflineMediaStore.cleanupPlaybackCache(this);
                   try {
                       NewPipe.init(OkHttpDownloader.getInstance(), Localization.DEFAULT, ContentCountry.DEFAULT);
                   } catch (Exception ignored) {}
@@ -2915,6 +3908,41 @@ jobs:
           print("ED ALL launcher icons generated from the supplied artwork.")
           PY
 
+      - name: Verify NewPipe, offline authorization, cache, and account isolation guards
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          bridge = Path("android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java").read_text()
+          activity = Path("android-project/app/src/main/java/app/lovable/edall/MainActivity.java").read_text()
+          store = Path("android-project/app/src/main/java/app/lovable/edall/OfflineMediaStore.java").read_text()
+          gradle = Path("android-project/app/build.gradle").read_text()
+          checks = {
+              "Pinned NewPipe dependency": "NewPipeExtractor:v0.26.5" in gradle,
+              "Native extraction uses NewPipe": "YoutubeStreamExtractor" in bridge and "ServiceList.YouTube" in bridge,
+              "Signed stream cache expires": "cacheExpiresAt" in bridge,
+              "Force refresh reaches Android bridge": "final boolean force" in bridge and "force === true" in activity,
+              "Lovable Cloud backend support": 'host.endsWith(".lovable.cloud")' in bridge,
+              "Server-side offline authorization": "functions/v1/authorize-offline-download" in bridge,
+              "Chunked versioned encrypted format": '"video-chunked-v2"' in store and '"EDALL02"' in store,
+              "Authenticated header and per-chunk AES-GCM": "headerAad" in store and "chunkAad" in store and "cipher.doFinal(sealed)" in store,
+              "Playback uses Android MediaDataSource": "extends MediaDataSource" in store and "setDataSource(dataSource)" in Path("android-project/app/src/main/java/app/lovable/edall/OfflinePlayerActivity.java").read_text(),
+              "Playback does not decrypt to a plaintext temporary file": "decryptToCache" not in store and "FileOutputStream" not in Path("android-project/app/src/main/java/app/lovable/edall/OfflinePlayerActivity.java").read_text() and "getCacheDir()" not in Path("android-project/app/src/main/java/app/lovable/edall/OfflinePlayerActivity.java").read_text(),
+              "Account-bound encryption authentication data": 'id + ":" + userId + ":"' in store,
+              "Native library verifies Supabase session": "auth/v1/user" in bridge and "verifiedUserId.equalsIgnoreCase(userId)" in bridge,
+              "Offline player blocks screenshots": "FLAG_SECURE" in Path("android-project/app/src/main/java/app/lovable/edall/OfflinePlayerActivity.java").read_text(),
+              "Account-scoped delete signature": "public static boolean delete(Context context, String id, String userId)" in store,
+              "Delete checks manifest owner": 'item.optString("userId")' in store,
+          }
+          for label, passed in checks.items():
+              print(f"{'PASS' if passed else 'FAIL'}: {label}")
+          if not all(checks.values()):
+              raise SystemExit("Android NewPipe/offline authorization/account-isolation guard check failed.")
+          if any(token in bridge.lower() for token in ("piped", "invidious", "yt-dlp")):
+              raise SystemExit("Android extraction must remain NewPipe-only.")
+          print("PASS: Android bridge does not route through Piped, Invidious, or yt-dlp.")
+          PY
+
       - name: Verify Gradle Version
         run: gradle --version
 
@@ -2925,6 +3953,7 @@ jobs:
           gradle :app:assembleRelease --no-daemon --stacktrace --info
 
       - name: Sign, align, and verify Release APK
+        if: github.event_name != 'pull_request'
         env:
           EDALL_KEYSTORE_BASE64: ${{ secrets.EDALL_KEYSTORE_BASE64 }}
           EDALL_KEYSTORE_PASSWORD: ${{ secrets.EDALL_KEYSTORE_PASSWORD }}
@@ -2971,14 +4000,23 @@ jobs:
           test -s ../EdAll.apk
 
       - name: Upload APK Artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: EdAll-Android-APK
           path: EdAll.apk
           if-no-files-found: error
 
+      - name: Upload unsigned Release APK for pull-request validation
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdAll-Android-Unsigned-PR
+          path: android-project/app/build/outputs/apk/release/app-release-unsigned.apk
+          if-no-files-found: error
+
       - name: Publish APK to GitHub Releases (optional)
-        if: startsWith(github.ref, 'refs/heads/')
+        if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/')
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
