@@ -3,8 +3,10 @@ run-name: Build EdAll Desktop Installer v2.6.2
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
-      - ".github/workflows/**"
+      - ".github/workflows/build-desktop.yml"
 
 # GitHub repository Settings must also allow Actions to create/update releases.
 permissions:
