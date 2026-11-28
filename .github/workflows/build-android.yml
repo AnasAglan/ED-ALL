@@ -1010,54 +1010,111 @@ jobs:
                   });
               }
           
+              private String verifySupabaseSessionUser(
+                  String supabaseUrl,
+                  String publishableKey,
+                  String accessToken
+              ) throws Exception {
+                  Uri base = Uri.parse(supabaseUrl == null ? "" : supabaseUrl);
+                  String host = base.getHost() == null ? "" : base.getHost().toLowerCase(Locale.ROOT);
+                  if (!"https".equalsIgnoreCase(base.getScheme()) ||
+                      !(host.endsWith(".supabase.co") || host.endsWith(".lovable.cloud")) ||
+                      base.getUserInfo() != null || base.getPort() != -1 ||
+                      (base.getPath() != null && !base.getPath().isEmpty() && !"/".equals(base.getPath())) ||
+                      base.getQuery() != null || base.getFragment() != null ||
+                      publishableKey == null || publishableKey.trim().isEmpty() ||
+                      accessToken == null || accessToken.length() < 40) {
+                      throw new Exception("تعذر التحقق من جلسة المنصة.");
+                  }
+                  okhttp3.Request request = new okhttp3.Request.Builder()
+                      .url(supabaseUrl.replaceAll("/+$", "") + "/auth/v1/user")
+                      .header("Authorization", "Bearer " + accessToken)
+                      .header("apikey", publishableKey)
+                      .header("Accept", "application/json")
+                      .get()
+                      .build();
+                  okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
+                      .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                      .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                      .callTimeout(25, java.util.concurrent.TimeUnit.SECONDS)
+                      .build();
+                  try (okhttp3.Response response = client.newCall(request).execute()) {
+                      String raw = response.body() == null ? "{}" : response.body().string();
+                      if (!response.isSuccessful()) throw new Exception("انتهت جلسة المنصة أو لم تعد صالحة.");
+                      JSONObject profile = new JSONObject(raw);
+                      String verifiedUserId = profile.optString("id", "");
+                      if (!verifiedUserId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                          throw new Exception("لم يؤكد الخادم هوية الحساب الحالي.");
+                      }
+                      return verifiedUserId;
+                  }
+              }
+
               @JavascriptInterface
-              public void openOfflineLibrary(final String userId) {
+              public void openOfflineLibrary(
+                  final String userId,
+                  final String accessToken,
+                  final String supabaseUrl,
+                  final String publishableKey
+              ) {
                   if (userId == null || !userId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
-                      Toast.makeText(context, "سجّل الدخول لعرض فيديوهات هذا الحساب.", Toast.LENGTH_LONG).show();
+                      mainHandler.post(() -> Toast.makeText(context, "سجّل الدخول لعرض فيديوهات هذا الحساب.", Toast.LENGTH_LONG).show());
                       return;
                   }
-                  mainHandler.post(() -> {
+                  executor.execute(() -> {
                       try {
-                          List<JSONObject> items = OfflineMediaStore.list(context, userId);
-                          if (items.isEmpty()) {
-                              Toast.makeText(context, "لا توجد فيديوهات محفوظة بعد.", Toast.LENGTH_LONG).show();
-                              return;
+                          String verifiedUserId = verifySupabaseSessionUser(supabaseUrl, publishableKey, accessToken);
+                          if (!verifiedUserId.equalsIgnoreCase(userId)) {
+                              throw new Exception("لا يمكن فتح مكتبة حساب مختلف عن الحساب المسجل حالياً.");
                           }
-                          String[] labels = new String[items.size()];
-                          for (int i = 0; i < items.size(); i++) {
-                              JSONObject item = items.get(i);
-                              labels[i] = item.optString("title", "ED-ALL video") + " — " +
-                                  item.optInt("height", 0) + "p";
-                          }
-                          new AlertDialog.Builder(context)
-                              .setTitle("الفيديوهات المحفوظة")
-                              .setItems(labels, (dialog, index) -> {
-                                  JSONObject item = items.get(index);
-                                  String id = item.optString("id");
+                          List<JSONObject> items = OfflineMediaStore.list(context, verifiedUserId);
+                          mainHandler.post(() -> {
+                              try {
+                                  if (items.isEmpty()) {
+                                      Toast.makeText(context, "لا توجد فيديوهات محفوظة بعد.", Toast.LENGTH_LONG).show();
+                                      return;
+                                  }
+                                  String[] labels = new String[items.size()];
+                                  for (int i = 0; i < items.size(); i++) {
+                                      JSONObject item = items.get(i);
+                                      labels[i] = item.optString("title", "ED-ALL video") + " — " +
+                                          item.optInt("height", 0) + "p";
+                                  }
                                   new AlertDialog.Builder(context)
-                                      .setTitle(item.optString("title", "ED-ALL video"))
-                                      .setItems(new String[]{"تشغيل", "حذف من الجهاز"}, (inner, action) -> {
-                                          if (action == 0) {
-                                              Intent intent = new Intent(context, OfflinePlayerActivity.class);
-                                              intent.putExtra("offline_video_id", id);
-                                              intent.putExtra("offline_user_id", userId);
-                                              context.startActivity(intent);
-                                          } else {
-                                              try {
-                                                  OfflineMediaStore.delete(context, id, userId);
-                                                  Toast.makeText(context, "تم حذف الفيديو المحفوظ.", Toast.LENGTH_SHORT).show();
-                                              } catch (Exception error) {
-                                                  Toast.makeText(context, "تعذر حذف الفيديو.", Toast.LENGTH_LONG).show();
-                                              }
-                                          }
+                                      .setTitle("الفيديوهات المحفوظة")
+                                      .setItems(labels, (dialog, index) -> {
+                                          JSONObject item = items.get(index);
+                                          String id = item.optString("id");
+                                          new AlertDialog.Builder(context)
+                                              .setTitle(item.optString("title", "ED-ALL video"))
+                                              .setItems(new String[]{"تشغيل", "حذف من الجهاز"}, (inner, action) -> {
+                                                  if (action == 0) {
+                                                      Intent intent = new Intent(context, OfflinePlayerActivity.class);
+                                                      intent.putExtra("offline_video_id", id);
+                                                      intent.putExtra("offline_user_id", verifiedUserId);
+                                                      context.startActivity(intent);
+                                                  } else {
+                                                      try {
+                                                          OfflineMediaStore.delete(context, id, verifiedUserId);
+                                                          Toast.makeText(context, "تم حذف الفيديو المحفوظ.", Toast.LENGTH_SHORT).show();
+                                                      } catch (Exception error) {
+                                                          Toast.makeText(context, "تعذر حذف الفيديو.", Toast.LENGTH_LONG).show();
+                                                      }
+                                                  }
+                                              })
+                                              .setNegativeButton("إغلاق", null)
+                                              .show();
                                       })
                                       .setNegativeButton("إغلاق", null)
                                       .show();
-                              })
-                              .setNegativeButton("إغلاق", null)
-                              .show();
+                              } catch (Exception error) {
+                                  Toast.makeText(context, "تعذر فتح مكتبة الفيديوهات.", Toast.LENGTH_LONG).show();
+                              }
+                          });
                       } catch (Exception error) {
-                          Toast.makeText(context, "تعذر فتح مكتبة الفيديوهات.", Toast.LENGTH_LONG).show();
+                          mainHandler.post(() -> Toast.makeText(context,
+                              error.getMessage() == null ? "تعذر التحقق من الحساب الحالي." : error.getMessage(),
+                              Toast.LENGTH_LONG).show());
                       }
                   });
               }
@@ -1158,7 +1215,9 @@ jobs:
                   "        } else { resolve({success:false,error:'Android download bridge unavailable'}); }" +
                   "      });" +
                   "    }," +
-                  "    openOfflineLibrary: function(userId) { if (window.AndroidBridge && window.AndroidBridge.openOfflineLibrary) window.AndroidBridge.openOfflineLibrary(userId || ''); }," +
+                  "    openOfflineLibrary: function(userId, accessToken, supabaseUrl, publishableKey) {" +
+                  "      if (window.AndroidBridge && window.AndroidBridge.openOfflineLibrary) window.AndroidBridge.openOfflineLibrary(userId || '', accessToken || '', supabaseUrl || '', publishableKey || '');" +
+                  "    }," +
                   "    setVideoFullscreen: function(enabled) { return Promise.resolve(true); }" +
                   "  };" +
                   "  var h = document.getElementById('desktopDownloadHero'); if(h) h.style.display = 'none';" +
@@ -3579,6 +3638,8 @@ jobs:
               "Lovable Cloud backend support": 'host.endsWith(".lovable.cloud")' in bridge,
               "Server-side offline authorization": "functions/v1/authorize-offline-download" in bridge,
               "Account-bound encryption authentication data": 'id + ":" + userId' in store,
+              "Native library verifies Supabase session": "auth/v1/user" in bridge and "verifiedUserId.equalsIgnoreCase(userId)" in bridge,
+              "Offline player blocks screenshots": "FLAG_SECURE" in Path("android-project/app/src/main/java/app/lovable/edall/OfflinePlayerActivity.java").read_text(),
               "Account-scoped delete signature": "public static boolean delete(Context context, String id, String userId)" in store,
               "Delete checks manifest owner": 'item.optString("userId")' in store,
           }
