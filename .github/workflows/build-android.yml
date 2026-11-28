@@ -3562,23 +3562,33 @@ jobs:
           print("ED ALL launcher icons generated from the supplied artwork.")
           PY
 
-      - name: Verify offline authorization and account isolation guards
+      - name: Verify NewPipe, offline authorization, cache, and account isolation guards
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          source = Path("android-project/app/src/main/java/app/lovable/edall/MainActivity.java").read_text()
+          bridge = Path("android-project/app/src/main/java/app/lovable/edall/WebAppInterface.java").read_text()
+          activity = Path("android-project/app/src/main/java/app/lovable/edall/MainActivity.java").read_text()
           store = Path("android-project/app/src/main/java/app/lovable/edall/OfflineMediaStore.java").read_text()
+          gradle = Path("android-project/app/build.gradle").read_text()
           checks = {
-              "Lovable Cloud backend support": 'host.endsWith(".lovable.cloud")' in source,
-              "server-side offline authorization": "functions/v1/authorize-offline-download" in source,
-              "account-scoped delete signature": "public static boolean delete(Context context, String id, String userId)" in store,
-              "delete checks manifest owner": 'item.optString("userId")' in store,
+              "Pinned NewPipe dependency": "NewPipeExtractor:v0.26.5" in gradle,
+              "Native extraction uses NewPipe": "YoutubeStreamExtractor" in bridge and "ServiceList.YouTube" in bridge,
+              "Signed stream cache expires": "cacheExpiresAt" in bridge,
+              "Force refresh reaches Android bridge": "final boolean force" in bridge and "force === true" in activity,
+              "Lovable Cloud backend support": 'host.endsWith(".lovable.cloud")' in bridge,
+              "Server-side offline authorization": "functions/v1/authorize-offline-download" in bridge,
+              "Account-bound encryption authentication data": 'id + ":" + userId' in store,
+              "Account-scoped delete signature": "public static boolean delete(Context context, String id, String userId)" in store,
+              "Delete checks manifest owner": 'item.optString("userId")' in store,
           }
           for label, passed in checks.items():
               print(f"{'PASS' if passed else 'FAIL'}: {label}")
           if not all(checks.values()):
-              raise SystemExit("Offline authorization/account-isolation guard check failed.")
+              raise SystemExit("Android NewPipe/offline authorization/account-isolation guard check failed.")
+          if any(token in bridge.lower() for token in ("piped", "invidious", "yt-dlp")):
+              raise SystemExit("Android extraction must remain NewPipe-only.")
+          print("PASS: Android bridge does not route through Piped, Invidious, or yt-dlp.")
           PY
 
       - name: Verify Gradle Version
